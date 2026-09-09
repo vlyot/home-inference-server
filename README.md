@@ -1,24 +1,26 @@
 # Home Inference Server
 
-I built this so I'd have my own free LLM inference on my desktop GPU instead of
-paying per-token for a hosted API (Groq, Mistral, and the like). The point is to
-have one place to plug the little side projects I build into — they get some LLM
-power without me spinning up a new Gemini project or API key for each one,
-worrying about keeping those keys out of client code, or juggling yet another
-cloud AI account and its billing. Any app I write later just points at this
-server; friends and family can use those apps too, signed in through Neon Auth,
-even when my PC is off.
+I built this so I'd stop paying per-token for hosted APIs (Groq, Mistral, and the
+like). Every small project I make now points at this one endpoint on my desktop —
+no new Gemini project or API key per app, no keys to keep out of client code, no
+extra cloud AI account to babysit. Friends and family can use those apps too,
+signed in through Neon Auth, whether or not my PC is on.
 
-It's an HTTP API on my desktop, backed by `llama.cpp`, that:
+Rather than just a `llama.cpp` wrapper, I built a serving layer around it: a
+request queue, a continuously-batched worker pool, and a scheduler that trades
+model quality for speed under live GPU pressure, plus a hosted relay that makes it
+reachable when the machine is off. Concretely:
 
-- **serves several requests at once** instead of one at a time
-- **shares the GPU with whatever else I'm doing** — it picks a smaller/faster
-  model, or offloads part of the model to system RAM, when a game needs the VRAM,
-  and drops back to full quality when the pressure lifts
-- **uses no VRAM at all when idle** — the model unloads a few seconds after the
-  last request and reloads on the next one
-- **still accepts requests when my PC is off** — they queue on a small hosted
-  service and run when the machine comes back
+- **Serves several requests at once** through a continuously-batched worker pool,
+  not one at a time.
+- **Shares the GPU with whatever else I'm doing.** Each request carries a
+  priority and a quality floor; when VRAM gets tight the server drops to a
+  smaller model or spills layers to system RAM, then climbs back to full quality
+  on its own when the pressure lifts. It doesn't OOM.
+- **Uses zero VRAM when idle.** The model unloads seconds after the last request
+  and reloads on the next — so it can run 24/7 alongside normal desktop use.
+- **Survives the PC being off.** Requests queue on a small hosted relay and drain
+  when the machine comes back; apps use the same API either way.
 
 ---
 
