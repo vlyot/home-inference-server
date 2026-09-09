@@ -1,0 +1,36 @@
+# Documentation & deploy runbooks (kept locally, not tracked in git)
+prd.md
+roadmap.md
+CLAUDE.md
+deploy/
+
+# Go build output
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/bin/
+
+# Test output
+*.test
+*.out
+
+# Go workspace
+go.work
+go.work.sum
+
+# Environment / secrets
+.env
+*.env
+config.json
+
+# IDE
+.vscode/settings.json
+.idea/
+
+# Model files (GGUF weights — too large for git)
+models/
+
+# llama.cpp binary directory
+/llama/

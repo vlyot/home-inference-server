@@ -1,0 +1,57 @@
+package types
+
+// ModelTierLabel is a human-readable tier identifier, ordered small → large.
+type ModelTierLabel string
+
+const (
+	TierWeak   ModelTierLabel = "weak"
+	TierMid    ModelTierLabel = "mid"
+	TierStrong ModelTierLabel = "strong"
+)
+
+// ModelDescriptor describes one entry in the tiered model roster.
+type ModelDescriptor struct {
+	TierLabel ModelTierLabel `json:"tier_label"`
+	Name      string         `json:"name"`
+	FilePath  string         `json:"file_path"`
+	// RequiredVRAMMB is the expected VRAM footprint for this model in megabytes.
+	RequiredVRAMMB int64  `json:"required_vram_mb"`
+	Modality       string `json:"modality"`
+	// GPULayers is the number of transformer layers to offload to GPU via
+	// llama-server --n-gpu-layers. -1 means offload all layers (full GPU).
+	// 0 means CPU-only. Normally computed dynamically at load time by
+	// vram.ComputeGPULayers; may be set explicitly in the roster.
+	GPULayers int `json:"gpu_layers"`
+	// Port is the localhost port for this tier's llama-server subprocess.
+	// Assign distinct ports per tier (e.g. 8090/8091/8092) to avoid collisions.
+	// Falls back to 8090 if zero.
+	Port int `json:"port"`
+	// TotalLayers is the model's transformer block count. It converts an
+	// --n-gpu-layers count into a GPU-resident weight fraction for the
+	// partial-offload fit test. 0 falls back to vram.defaultTotalLayers.
+	TotalLayers int `json:"total_layers"`
+	// KVOverheadMB is the measured non-weight VRAM cost at --ctx-size 4096
+	// with a single context (KV cache + compute buffers + CUDA context), read
+	// from llama-server startup logs. Retained as a single-context shorthand:
+	// when KVCacheMB/KVFixedMB are both zero, callers treat the whole value as
+	// per-slot KV cache (see kvParts).
+	KVOverheadMB int64 `json:"kv_overhead_mb"`
+	// KVCacheMB is the per-slot KV-cache VRAM cost at --ctx-size 4096. It scales
+	// linearly with llama-server's --parallel N (N concurrent contexts each hold
+	// their own KV cache). Read from llama-server startup logs.
+	KVCacheMB int64 `json:"kv_cache_mb"`
+	// KVFixedMB is the non-weight VRAM cost that does NOT scale with --parallel:
+	// compute buffers plus the CUDA context. Read from llama-server startup logs.
+	KVFixedMB int64 `json:"kv_fixed_mb"`
+}
+
+// KVParts returns the descriptor's per-slot KV-cache cost and its fixed
+// (concurrency-independent) overhead. When KVCacheMB/KVFixedMB are unset it
+// falls back to treating KVOverheadMB entirely as per-slot KV cache, which
+// over-budgets slightly under --parallel N but never under-budgets.
+func (d ModelDescriptor) KVParts() (cacheMB, fixedMB int64) {
+	if d.KVCacheMB > 0 || d.KVFixedMB > 0 {
+		return d.KVCacheMB, d.KVFixedMB
+	}
+	return d.KVOverheadMB, 0
+}
