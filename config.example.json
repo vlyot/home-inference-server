@@ -1,0 +1,5 @@
+{
+  "_comment": "Copy to config.json (git-ignored) OR set the equivalent env vars (RAILWAY_QUEUE_URL / RAILWAY_QUEUE_API_KEY win over this file). Only cmd/server reads this.",
+  "railway_queue_url": "https://your-queue-api.up.railway.app",
+  "railway_api_key": "PASTE_RELAY_QUEUE_API_KEY_HERE"
+}
