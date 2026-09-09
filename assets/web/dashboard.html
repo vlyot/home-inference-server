@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Home Inference Server</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: ui-monospace, "SF Mono", Consolas, monospace;
+    font-size: 13px;
+    background: #0d0d0f;
+    color: #d4d4d8;
+    min-height: 100vh;
+    padding: 24px;
+  }
+
+  header {
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+    margin-bottom: 24px;
+    border-bottom: 1px solid #27272a;
+    padding-bottom: 16px;
+  }
+
+  header h1 { font-size: 16px; font-weight: 600; color: #f4f4f5; }
+  .meta { color: #71717a; font-size: 12px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; display: inline-block; margin-right: 6px; }
+  .dot.stale { background: #ef4444; }
+  .dot.draining { background: #f59e0b; }
+
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 12px;
+    margin-bottom: 24px;
+  }
+
+  .stat {
+    background: #18181b;
+    border: 1px solid #27272a;
+    border-radius: 6px;
+    padding: 14px 16px;
+  }
+
+  .stat.warn { border-color: #78350f; background: #1c1409; }
+
+  .stat-label { font-size: 11px; color: #71717a; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px; }
+  .stat-value { font-size: 20px; font-weight: 600; color: #f4f4f5; }
+  .stat-sub { font-size: 11px; color: #71717a; margin-top: 4px; }
+
+  .section-title {
+    font-size: 12px;
+    color: #71717a;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 10px;
+  }
+
+  .table-wrap { overflow-x: auto; }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    background: #18181b;
+    border: 1px solid #27272a;
+    border-radius: 6px;
+    overflow: hidden;
+    min-width: 860px;
+  }
+
+  th {
+    text-align: left;
+    padding: 8px 12px;
+    font-size: 11px;
+    color: #71717a;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    border-bottom: 1px solid #27272a;
+    background: #121214;
+    white-space: nowrap;
+  }
+
+  td {
+    padding: 8px 12px;
+    border-bottom: 1px solid #1f1f22;
+    color: #d4d4d8;
+    vertical-align: middle;
+    white-space: nowrap;
+  }
+
+  tr:last-child td { border-bottom: none; }
+
+  .badge {
+    display: inline-block;
+    padding: 2px 7px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 500;
+  }
+
+  .badge-done      { background: #14532d; color: #86efac; }
+  .badge-failed    { background: #450a0a; color: #fca5a5; }
+  .badge-queued    { background: #172554; color: #93c5fd; }
+  .badge-deferred  { background: #422006; color: #fdba74; }
+  .badge-high      { background: #450a0a; color: #fca5a5; }
+  .badge-normal    { background: #27272a; color: #a1a1aa; }
+  .badge-low       { background: #1a1a1e; color: #71717a; }
+  .badge-other     { background: #27272a; color: #a1a1aa; }
+
+  .corr-id { font-size: 11px; color: #71717a; }
+
+  #status-indicator { margin-left: auto; font-size: 11px; color: #71717a; }
+
+  .empty { padding: 32px 12px; text-align: center; color: #52525b; }
+</style>
+</head>
+<body>
+
+<header>
+  <span class="dot" id="dot"></span>
+  <h1>Home Inference Server</h1>
+  <span class="meta" id="version"></span>
+  <span class="meta" id="uptime"></span>
+  <a href="/chat" style="font-size:11px;color:#71717a;text-decoration:none;" onmouseover="this.style.color='#d4d4d8'" onmouseout="this.style.color='#71717a'">Chat →</a>
+  <a href="/logs" style="font-size:11px;color:#71717a;text-decoration:none;" onmouseover="this.style.color='#d4d4d8'" onmouseout="this.style.color='#71717a'">Logs →</a>
+  <a href="/admin" style="font-size:11px;color:#71717a;text-decoration:none;" onmouseover="this.style.color='#d4d4d8'" onmouseout="this.style.color='#71717a'">Admin →</a>
+  <a href="/docs" style="font-size:11px;color:#71717a;text-decoration:none;" onmouseover="this.style.color='#d4d4d8'" onmouseout="this.style.color='#71717a'">API Docs →</a>
+  <span id="status-indicator">connecting…</span>
+</header>
+
+<div id="drain-banner" class="stat warn" hidden style="margin-bottom:16px;">
+  ⚠ Draining — new inference requests are being rejected. <code>POST /v1/admin/resume</code> (or the <a href="/admin" style="color:#fdba74;">Admin</a> page) to clear.
+</div>
+
+<div class="stats">
+  <div class="stat">
+    <div class="stat-label">Queue Depth</div>
+    <div class="stat-value" id="queue-depth">—</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Active Batch</div>
+    <div class="stat-value" id="active-batch">—</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">In-Flight</div>
+    <div class="stat-value" id="in-flight">—</div>
+    <div class="stat-sub" id="in-flight-sub"></div>
+  </div>
+  <div class="stat" id="stat-defer">
+    <div class="stat-label">Deferred</div>
+    <div class="stat-value" id="defer-depth">—</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Loaded Model</div>
+    <div class="stat-value" id="model-name">—</div>
+    <div class="stat-sub" id="model-sub"></div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Active Tier</div>
+    <div class="stat-value" id="active-tier">—</div>
+    <div class="stat-sub" id="gpu-split"></div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Tok / sec</div>
+    <div class="stat-value" id="tok-per-sec">—</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">CPU</div>
+    <div class="stat-value" id="cpu-pct">—</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">VRAM</div>
+    <div class="stat-value" id="vram">—</div>
+    <div class="stat-sub" id="vram-sub"></div>
+  </div>
+</div>
+
+<div class="section-title">Recent Jobs</div>
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>Time</th>
+      <th>Correlation ID</th>
+      <th>Modality</th>
+      <th>Priority</th>
+      <th>Min Tier</th>
+      <th>Tier</th>
+      <th>Status</th>
+      <th>Queue Wait</th>
+      <th>Inference</th>
+      <th>Tokens</th>
+    </tr>
+  </thead>
+  <tbody id="jobs-body">
+    <tr><td class="empty" colspan="10">No jobs yet</td></tr>
+  </tbody>
+</table>
+</div>
+
+<script>
+  const $ = id => document.getElementById(id);
+
+  function fmtUptime(since) {
+    const s = Math.floor((Date.now() - new Date(since)) / 1000);
+    if (s < 60) return `up ${s}s`;
+    if (s < 3600) return `up ${Math.floor(s/60)}m`;
+    return `up ${Math.floor(s/3600)}h ${Math.floor((s%3600)/60)}m`;
+  }
+
+  function fmtGpuSplit(layers, total) {
+    if (layers == null) return '';
+    if (layers < 0) return 'full GPU';
+    if (layers === 0) return 'CPU only';
+    return total ? `${layers} / ${total} layers on GPU` : `${layers} layers on GPU`;
+  }
+
+  function fmtModelAge(loadedAt) {
+    if (!loadedAt) return '';
+    const s = Math.floor((Date.now() - new Date(loadedAt)) / 1000);
+    if (s < 60) return `loaded ${s}s ago`;
+    return `loaded ${Math.floor(s/60)}m ago`;
+  }
+
+  function fmtTime(ts) {
+    const d = new Date(ts);
+    return d.toLocaleTimeString('en-GB', { hour12: false });
+  }
+
+  function badge(cls, text) {
+    return `<span class="badge badge-${cls}">${text}</span>`;
+  }
+
+  function statusBadge(status) {
+    const map = { done: 'done', failed: 'failed', queued: 'queued', batching: 'other', inferring: 'other' };
+    const cls = map[status] || 'other';
+    return badge(cls, status);
+  }
+
+  function priorityBadge(p) {
+    if (!p) return '—';
+    const cls = p === 'high' ? 'high' : p === 'low' ? 'low' : 'normal';
+    return badge(cls, p);
+  }
+
+  function renderJobs(jobs) {
+    const tbody = $('jobs-body');
+    if (!jobs || jobs.length === 0) {
+      tbody.innerHTML = '<tr><td class="empty" colspan="10">No jobs yet</td></tr>';
+      return;
+    }
+    tbody.innerHTML = jobs.map(j => {
+      const deferredBadge = j.deferred ? ' ' + badge('deferred', 'deferred') : '';
+      return `
+      <tr>
+        <td>${fmtTime(j.finished_at || j.enqueued_at)}</td>
+        <td class="corr-id">${(j.correlation_id || '').slice(0, 20)}…</td>
+        <td>${j.modality || '—'}</td>
+        <td>${priorityBadge(j.priority)}</td>
+        <td>${j.min_tier || '—'}</td>
+        <td>${j.model_tier || '—'}</td>
+        <td>${statusBadge(j.status)}${deferredBadge}</td>
+        <td>${j.queue_wait_ms != null ? j.queue_wait_ms + ' ms' : '—'}</td>
+        <td>${j.inference_ms != null ? j.inference_ms + ' ms' : '—'}</td>
+        <td>${j.tokens_generated || 0}</td>
+      </tr>
+    `}).join('');
+  }
+
+  async function poll() {
+    try {
+      const r = await fetch('/v1/status');
+      if (!r.ok) throw new Error(r.status);
+      const d = await r.json();
+
+      const draining = d.state === 'draining';
+      $('dot').className = draining ? 'dot draining' : 'dot';
+      $('drain-banner').hidden = !draining;
+      $('status-indicator').textContent = draining ? 'draining' : 'live';
+      $('version').textContent = d.version || '';
+      $('uptime').textContent = d.uptime_since ? fmtUptime(d.uptime_since) : '';
+      $('queue-depth').textContent = d.queue_depth ?? '—';
+      $('active-batch').textContent = d.active_batch_size ?? '—';
+      $('in-flight').textContent = d.in_flight ?? '—';
+      $('in-flight-sub').textContent = d.max_parallel ? `of ${d.max_parallel} max` : '';
+
+      const deferDepth = d.defer_queue_depth ?? 0;
+      $('defer-depth').textContent = deferDepth;
+      const deferStat = $('stat-defer');
+      if (deferDepth > 0) {
+        deferStat.classList.add('warn');
+      } else {
+        deferStat.classList.remove('warn');
+      }
+
+      $('cpu-pct').textContent = d.cpu_pct != null ? d.cpu_pct.toFixed(1) + '%' : '—';
+      $('tok-per-sec').textContent = d.tokens_per_sec != null && d.tokens_per_sec > 0
+        ? d.tokens_per_sec.toFixed(1)
+        : '—';
+
+      if (d.loaded_model) {
+        const desc = d.loaded_model.descriptor;
+        $('model-name').textContent = desc.tier_label || desc.name || '—';
+        $('model-sub').textContent = [
+          desc.name,
+          fmtModelAge(d.loaded_model.loaded_at),
+        ].filter(Boolean).join(' · ');
+        $('active-tier').textContent = desc.tier_label || '—';
+        $('gpu-split').textContent = fmtGpuSplit(d.loaded_model.gpu_layers, d.loaded_model.total_layers);
+      } else {
+        $('model-name').textContent = 'idle';
+        $('model-sub').textContent = '~0 MB VRAM';
+        $('active-tier').textContent = '—';
+        $('gpu-split').textContent = '';
+      }
+
+      if (d.available_vram_mb != null && d.available_vram_mb >= 0) {
+        $('vram').textContent = d.available_vram_mb + ' MB free';
+        const self = d.self_vram_mb || 0;
+        $('vram-sub').textContent = self > 0 ? `server ${self} MB` : '';
+      } else {
+        $('vram').textContent = 'N/A';
+        $('vram-sub').textContent = '';
+      }
+
+      renderJobs(d.recent_jobs);
+      return true;
+    } catch (e) {
+      $('dot').className = 'dot stale';
+      $('status-indicator').textContent = 'unreachable';
+      return false;
+    }
+  }
+
+  let pollInterval = 2000;
+  const pollMin = 2000;
+  const pollMax = 30000;
+
+  async function scheduledPoll() {
+    const ok = await poll();
+    pollInterval = ok ? pollMin : Math.min(pollInterval * 2, pollMax);
+    setTimeout(scheduledPoll, pollInterval);
+  }
+
+  scheduledPoll();
+</script>
+</body>
+</html>

@@ -1,0 +1,1162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>API Reference — Home Inference Server</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: ui-monospace, "SF Mono", Consolas, monospace;
+    font-size: 13px;
+    background: #0d0d0f;
+    color: #d4d4d8;
+    min-height: 100vh;
+    padding: 24px;
+  }
+
+  header {
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+    margin-bottom: 16px;
+    border-bottom: 1px solid #27272a;
+    padding-bottom: 16px;
+  }
+
+  header h1 { font-size: 16px; font-weight: 600; color: #f4f4f5; }
+  .meta { color: #71717a; font-size: 12px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; display: inline-block; margin-right: 6px; }
+
+  .badge {
+    display: inline-block;
+    padding: 2px 7px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 500;
+  }
+
+  .badge-done      { background: #14532d; color: #86efac; }
+  .badge-failed    { background: #450a0a; color: #fca5a5; }
+  .badge-queued    { background: #172554; color: #93c5fd; }
+  .badge-deferred  { background: #422006; color: #fdba74; }
+  .badge-high      { background: #450a0a; color: #fca5a5; }
+  .badge-normal    { background: #27272a; color: #a1a1aa; }
+  .badge-low       { background: #1a1a1e; color: #71717a; }
+  .badge-other     { background: #27272a; color: #a1a1aa; }
+
+  #status-indicator { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+
+  .table-wrap { overflow-x: auto; margin-bottom: 20px; }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    background: #18181b;
+    border: 1px solid #27272a;
+    border-radius: 6px;
+    overflow: hidden;
+    min-width: 600px;
+  }
+
+  th {
+    text-align: left;
+    padding: 8px 12px;
+    font-size: 11px;
+    color: #71717a;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    border-bottom: 1px solid #27272a;
+    background: #121214;
+    white-space: nowrap;
+  }
+
+  td {
+    padding: 8px 12px;
+    border-bottom: 1px solid #1f1f22;
+    color: #d4d4d8;
+    vertical-align: top;
+  }
+
+  tr:last-child td { border-bottom: none; }
+
+  /* docs-specific */
+  nav {
+    margin-bottom: 28px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid #1f1f22;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 0;
+  }
+
+  nav a {
+    margin-right: 16px;
+    font-size: 12px;
+    color: #71717a;
+    text-decoration: none;
+  }
+  nav a:hover { color: #d4d4d8; }
+  nav .nav-sep { margin-right: 16px; color: #3f3f46; }
+
+  h2 {
+    font-size: 14px;
+    font-weight: 600;
+    color: #f4f4f5;
+    margin: 32px 0 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid #27272a;
+  }
+
+  h3 {
+    font-size: 13px;
+    font-weight: 600;
+    color: #e4e4e7;
+    margin: 20px 0 8px;
+  }
+
+  p { color: #a1a1aa; line-height: 1.6; margin-bottom: 10px; }
+
+  pre {
+    background: #18181b;
+    border: 1px solid #27272a;
+    border-radius: 6px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    margin-bottom: 14px;
+  }
+
+  code { color: #86efac; font-size: 12px; }
+  pre code { color: #d4d4d8; font-size: 12px; }
+
+  a { color: #60a5fa; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  .field-name    { color: #f4f4f5; font-weight: 500; }
+  .field-type    { color: #fdba74; font-size: 11px; }
+  .field-default { color: #71717a; font-size: 11px; }
+  .field-desc    { color: #a1a1aa; line-height: 1.5; }
+
+  .note {
+    background: #18181b;
+    border: 1px solid #27272a;
+    border-left: 3px solid #3b82f6;
+    border-radius: 4px;
+    padding: 10px 14px;
+    color: #a1a1aa;
+    margin-bottom: 14px;
+    line-height: 1.6;
+  }
+
+  section { margin-bottom: 8px; }
+</style>
+</head>
+<body>
+
+<header>
+  <span class="dot"></span>
+  <h1>Home Inference Server</h1>
+  <span class="meta">API Reference</span>
+  <span id="status-indicator">
+    <a href="/chat" class="badge badge-queued">Chat UI</a>
+    <a href="/logs" class="badge badge-queued">Logs UI</a>
+    <a href="/healthz" class="badge badge-done">GET /healthz</a>
+    <a href="/v1/status/pressure" class="badge badge-queued">GET /v1/status/pressure</a>
+  </span>
+</header>
+
+<nav>
+  <a href="#quick-start">Quick Start</a>
+  <a href="#request-ref">Request</a>
+  <a href="#response-ref">Response</a>
+  <a href="#streaming">Streaming</a>
+  <a href="#pressure-policy">Pressure Policy</a>
+  <a href="#error-codes">Error Codes</a>
+  <a href="#model-roster">Models</a>
+  <a href="#remote-access">Remote Access</a>
+  <a href="#specialist-backends">Specialist Backends</a>
+  <span class="nav-sep">|</span>
+  <a href="/dashboard">← Dashboard</a>
+  <a href="/chat">Chat UI →</a>
+  <a href="/logs">Logs UI →</a>
+</nav>
+
+<!-- ─── Quick Start ─────────────────────────────────────────────────── -->
+<section id="quick-start">
+<h2>Quick Start</h2>
+
+<p>All inference requests go to <code>POST /v1/infer</code> with a JSON body. The server runs on <code>http://localhost:8080</code> by default.</p>
+
+<h3>Text prompt</h3>
+<pre><code>curl -X POST http://localhost:8080/v1/infer \
+  -H "Content-Type: application/json" \
+  -d '{
+    "modality": "text",
+    "text_input": { "prompt": "Hello, world!" }
+  }'</code></pre>
+
+<h3>Chat messages</h3>
+<pre><code>curl -X POST http://localhost:8080/v1/infer \
+  -H "Content-Type: application/json" \
+  -d '{
+    "modality": "text",
+    "system_prompt": "You are a helpful assistant.",
+    "text_input": {
+      "messages": [
+        { "role": "user", "content": "What is 2 + 2?" }
+      ]
+    }
+  }'</code></pre>
+
+<h3>Vision (image URL)</h3>
+<p><strong>Not yet implemented.</strong> <code>modality: "vision"</code> is a
+registered route but returns <code>501 {"code":"not_implemented"}</code> in this
+build. The request shape below is stable for when a multimodal backend is wired
+up; <code>prompt</code> and one of <code>image_base64</code> / <code>image_url</code>
+are required (a missing one is <code>400</code>).</p>
+<pre><code>curl -X POST http://localhost:8080/v1/infer \
+  -H "Content-Type: application/json" \
+  -d '{
+    "modality": "vision",
+    "vision_input": {
+      "image_url": "https://example.com/photo.jpg",
+      "prompt": "Describe this image."
+    }
+  }'   # -> 501 not_implemented</code></pre>
+
+<h3>Streaming (SSE)</h3>
+<pre><code>curl -N -X POST http://localhost:8080/v1/infer \
+  -H "Content-Type: application/json" \
+  -d '{
+    "modality": "text",
+    "text_input": { "prompt": "Tell me a short story." },
+    "stream": true
+  }'</code></pre>
+</section>
+
+<!-- ─── Request Reference ────────────────────────────────────────────── -->
+<section id="request-ref">
+<h2>Request Reference</h2>
+
+<p><code>POST /v1/infer</code> — body: <code>application/json</code></p>
+
+<h3>InferRequest</h3>
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>Field</th>
+      <th>Type</th>
+      <th>Default</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="field-name">correlation_id</td>
+      <td class="field-type">string</td>
+      <td class="field-default">auto</td>
+      <td class="field-desc">Caller-supplied tracing ID, propagated through every log event and response. If omitted, the server generates one (<code>"req-"</code> + UUID4 without hyphens).</td>
+    </tr>
+    <tr>
+      <td class="field-name">modality</td>
+      <td class="field-type">string</td>
+      <td class="field-default">required</td>
+      <td class="field-desc">Inference modality. Must be <code>"text"</code> or <code>"vision"</code>.</td>
+    </tr>
+    <tr>
+      <td class="field-name">text_input</td>
+      <td class="field-type">TextInput</td>
+      <td class="field-default">—</td>
+      <td class="field-desc">Required when <code>modality = "text"</code>. See TextInput below.</td>
+    </tr>
+    <tr>
+      <td class="field-name">vision_input</td>
+      <td class="field-type">VisionInput</td>
+      <td class="field-default">—</td>
+      <td class="field-desc">Required when <code>modality = "vision"</code>. See VisionInput below.</td>
+    </tr>
+    <tr>
+      <td class="field-name">max_tokens</td>
+      <td class="field-type">integer</td>
+      <td class="field-default">0 (server default)</td>
+      <td class="field-desc">Maximum output tokens to generate. <code>0</code> (the default) means: for a request carrying <code>text_input.messages</code> (chat-completions endpoint), the server tokenizes the conversation, reads the loaded model's context size, and uses <strong>whatever is actually left</strong> in the context window (minus a 10% safety margin) — so a reasoning-capable model's "thinking" tokens (see <a href="#streaming">Streaming Guide</a>) get the full remaining budget instead of an arbitrary cap. Falls back to a fixed <strong>2048</strong> if that introspection fails. For a plain <code>text_input.prompt</code> (single-shot completion endpoint, no chat template, no reasoning), <code>0</code> uses a fixed <strong>512</strong>.</td>
+    </tr>
+    <tr>
+      <td class="field-name">temperature</td>
+      <td class="field-type">float</td>
+      <td class="field-default">0.0 (server default)</td>
+      <td class="field-desc">Sampling temperature. Higher = more random. <code>0.0</code> uses the server default.</td>
+    </tr>
+    <tr>
+      <td class="field-name">system_prompt</td>
+      <td class="field-type">string</td>
+      <td class="field-default">""</td>
+      <td class="field-desc">Convenience shorthand — equivalent to prepending a <code>role=system</code> message. Ignored if <code>text_input.messages</code> already contains a system entry.</td>
+    </tr>
+    <tr>
+      <td class="field-name">stream</td>
+      <td class="field-type">boolean</td>
+      <td class="field-default">false</td>
+      <td class="field-desc">When true, response is <code>text/event-stream</code> (SSE). See <a href="#streaming">Streaming Guide</a>.</td>
+    </tr>
+    <tr>
+      <td class="field-name">timeout_ms</td>
+      <td class="field-type">integer</td>
+      <td class="field-default">0 (server default)</td>
+      <td class="field-desc">Caller-specified deadline in milliseconds. Returns <code>408 timeout</code> if exceeded. <code>0</code> uses the server default — <strong>600&nbsp;000&nbsp;ms</strong>, overridable with the <code>HIS_INFER_TIMEOUT_MS</code> env var. There is always a deadline; a hung backend cannot block indefinitely.</td>
+    </tr>
+    <tr>
+      <td class="field-name">priority</td>
+      <td class="field-type">string</td>
+      <td class="field-default">"normal"</td>
+      <td class="field-desc">Urgency level. Controls speed-floor enforcement and (for <code>"high"</code>) bypasses deferral, triggering an <code>X-Quality-Degraded: true</code> header when served on the Weak tier. Values: <code>"high"</code> | <code>"normal"</code> | <code>"low"</code>. <code>"low"</code> has no speed floor.</td>
+    </tr>
+    <tr>
+      <td class="field-name">min_tier</td>
+      <td class="field-type">string</td>
+      <td class="field-default">"weak"</td>
+      <td class="field-desc">Quality floor. If the router would select a tier below this value, the request is <code>overloaded</code> (429) rather than served degraded. Values: <code>"strong"</code> | <code>"mid"</code> | <code>"weak"</code>.</td>
+    </tr>
+    <tr>
+      <td class="field-name">preferred_tier</td>
+      <td class="field-type">string</td>
+      <td class="field-default">"" (automatic)</td>
+      <td class="field-desc">Pins tier selection to exactly this tier instead of the default "largest tier that fits in free VRAM" — e.g. deliberately running the small model to leave VRAM headroom for other GPU work. Values: <code>"strong"</code> | <code>"mid"</code> | <code>"weak"</code>. Unlike <code>min_tier</code> (a floor, never upgraded away from), this is an exact pin: it evicts a larger already-loaded model if needed, and the speed-floor cascade never overrides it. An unrecognized value returns <code>400 invalid_request</code>. Backs the model-tier dropdown in the built-in Chat UI at <code>GET /chat</code>.</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<h3>TextInput</h3>
+<p>Exactly one of <code>prompt</code> or <code>messages</code> must be set.</p>
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr><th>Field</th><th>Type</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="field-name">prompt</td>
+      <td class="field-type">string</td>
+      <td class="field-desc">Single-turn completion prompt. Mutually exclusive with <code>messages</code>.</td>
+    </tr>
+    <tr>
+      <td class="field-name">messages</td>
+      <td class="field-type">ChatMessage[]</td>
+      <td class="field-desc">Full multi-turn conversation history. Mutually exclusive with <code>prompt</code>. The entire array is sent to the model's chat-completions endpoint every request (the model itself is stateless), so resend the whole conversation each turn. The combined transcript plus the reply must fit the model context window (<code>n_ctx</code>, 4096 for the current roster) — when it overruns, the server silently drops the oldest turns. See ChatMessage below.</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<h3>ChatMessage</h3>
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr><th>Field</th><th>Type</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="field-name">role</td>
+      <td class="field-type">string</td>
+      <td class="field-desc">Speaker role. Values: <code>"system"</code> | <code>"user"</code> | <code>"assistant"</code>.</td>
+    </tr>
+    <tr>
+      <td class="field-name">content</td>
+      <td class="field-type">string</td>
+      <td class="field-desc">Message text.</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<h3>VisionInput</h3>
+<p>Exactly one of <code>image_base64</code> or <code>image_url</code> must be set. <code>prompt</code> is always required.</p>
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr><th>Field</th><th>Type</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="field-name">image_base64</td>
+      <td class="field-type">string</td>
+      <td class="field-desc">Base64-encoded image bytes. Mutually exclusive with <code>image_url</code>.</td>
+    </tr>
+    <tr>
+      <td class="field-name">image_url</td>
+      <td class="field-type">string</td>
+      <td class="field-desc">URL of the image to analyze. Mutually exclusive with <code>image_base64</code>.</td>
+    </tr>
+    <tr>
+      <td class="field-name">prompt</td>
+      <td class="field-type">string</td>
+      <td class="field-desc">Required. The question or instruction about the image.</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+</section>
+
+<!-- ─── Response Reference ──────────────────────────────────────────── -->
+<section id="response-ref">
+<h2>Response Reference</h2>
+
+<h3>InferResponse (blocking mode)</h3>
+<p>Returned as <code>application/json</code> when <code>stream</code> is false or omitted.</p>
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr><th>Field</th><th>Type</th><th>Notes</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="field-name">request_id</td>
+      <td class="field-type">string</td>
+      <td class="field-desc">Server-generated unique ID for this request.</td>
+    </tr>
+    <tr>
+      <td class="field-name">correlation_id</td>
+      <td class="field-type">string</td>
+      <td class="field-desc">Echo of the caller-supplied or server-generated correlation ID.</td>
+    </tr>
+    <tr>
+      <td class="field-name">modality</td>
+      <td class="field-type">string</td>
+      <td class="field-desc">Echo of the request modality.</td>
+    </tr>
+    <tr>
+      <td class="field-name">output</td>
+      <td class="field-type">string</td>
+      <td class="field-desc">Generated text.</td>
+    </tr>
+    <tr>
+      <td class="field-name">reasoning</td>
+      <td class="field-type">string</td>
+      <td class="field-desc">Omitted when empty. A reasoning-capable model's (e.g. Gemma's "thinking" mode) chain-of-thought text, kept separate from <code>output</code>. Only present when the underlying model emits a <code>reasoning_content</code> field.</td>
+    </tr>
+    <tr>
+      <td class="field-name">tokens_generated</td>
+      <td class="field-type">integer</td>
+      <td class="field-desc">Number of tokens produced.</td>
+    </tr>
+    <tr>
+      <td class="field-name">tokens_per_sec</td>
+      <td class="field-type">float</td>
+      <td class="field-desc">Observed generation speed for this job (tokens / second).</td>
+    </tr>
+    <tr>
+      <td class="field-name">queue_wait_ms</td>
+      <td class="field-type">integer</td>
+      <td class="field-desc">Milliseconds the request spent in the queue before inference began.</td>
+    </tr>
+    <tr>
+      <td class="field-name">inference_ms</td>
+      <td class="field-type">integer</td>
+      <td class="field-desc">Milliseconds spent in active inference (total − queue wait).</td>
+    </tr>
+    <tr>
+      <td class="field-name">duration_ms</td>
+      <td class="field-type">integer</td>
+      <td class="field-desc">Total wall-clock milliseconds from enqueue to result ready.</td>
+    </tr>
+    <tr>
+      <td class="field-name">model_tier</td>
+      <td class="field-type">string</td>
+      <td class="field-desc">Tier that handled this job. May differ from the requested tier due to VRAM-based fallback.</td>
+    </tr>
+    <tr>
+      <td class="field-name">finished_at</td>
+      <td class="field-type">string (RFC 3339)</td>
+      <td class="field-desc">Timestamp when inference completed.</td>
+    </tr>
+    <tr>
+      <td class="field-name">deferred</td>
+      <td class="field-type">boolean</td>
+      <td class="field-desc">Omitted when false. On a <code>200</code> this is not set — a served request was never deferred. See <a href="#pressure">Deferral</a> for the <code>202</code> hand-off response.</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<h3>StreamChunk (streaming mode)</h3>
+<p>Each SSE event carries one <code>StreamChunk</code> JSON payload. The final chunk has <code>done: true</code> and populates the summary fields. See the <a href="#streaming">Streaming Guide</a> for consumption details.</p>
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr><th>Field</th><th>Type</th><th>Notes</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="field-name">request_id</td>
+      <td class="field-type">string</td>
+      <td class="field-desc">Server-generated unique ID.</td>
+    </tr>
+    <tr>
+      <td class="field-name">correlation_id</td>
+      <td class="field-type">string</td>
+      <td class="field-desc">Caller-supplied or generated correlation ID.</td>
+    </tr>
+    <tr>
+      <td class="field-name">delta</td>
+      <td class="field-type">string</td>
+      <td class="field-desc">Partial visible-answer text for this chunk. Empty on the final <code>done=true</code> chunk.</td>
+    </tr>
+    <tr>
+      <td class="field-name">reasoning</td>
+      <td class="field-type">string</td>
+      <td class="field-desc">Omitted when empty. Partial chain-of-thought text from a reasoning-capable model (e.g. Gemma's "thinking" mode). Mutually exclusive with <code>delta</code> on any given chunk — never both set. Render separately (a collapsible "Thinking…" section, as the built-in Chat UI does), not appended to the visible answer.</td>
+    </tr>
+    <tr>
+      <td class="field-name">done</td>
+      <td class="field-type">boolean</td>
+      <td class="field-desc">Signals end of stream. When true, summary fields below are populated.</td>
+    </tr>
+    <tr>
+      <td class="field-name">tokens_generated</td>
+      <td class="field-type">integer</td>
+      <td class="field-desc">Populated on <code>done=true</code>.</td>
+    </tr>
+    <tr>
+      <td class="field-name">tokens_per_sec</td>
+      <td class="field-type">float</td>
+      <td class="field-desc">Populated on <code>done=true</code>.</td>
+    </tr>
+    <tr>
+      <td class="field-name">queue_wait_ms</td>
+      <td class="field-type">integer</td>
+      <td class="field-desc">Populated on <code>done=true</code>.</td>
+    </tr>
+    <tr>
+      <td class="field-name">inference_ms</td>
+      <td class="field-type">integer</td>
+      <td class="field-desc">Populated on <code>done=true</code>.</td>
+    </tr>
+    <tr>
+      <td class="field-name">duration_ms</td>
+      <td class="field-type">integer</td>
+      <td class="field-desc">Populated on <code>done=true</code>.</td>
+    </tr>
+    <tr>
+      <td class="field-name">model_tier</td>
+      <td class="field-type">string</td>
+      <td class="field-desc">Populated on <code>done=true</code>.</td>
+    </tr>
+    <tr>
+      <td class="field-name">deferred</td>
+      <td class="field-type">boolean</td>
+      <td class="field-desc">Not set on a real stream. A streaming request that is deferred under pressure gets a plain <code>202</code> JSON body (<code>{"deferred": true, "result_url": ...}</code>), not an SSE stream — poll the relay's <code>result_url</code>.</td>
+    </tr>
+    <tr>
+      <td class="field-name">error</td>
+      <td class="field-type">string</td>
+      <td class="field-desc">Set on the final <code>done=true</code> chunk when inference failed mid-stream (e.g. <code>"overloaded"</code>, <code>"timeout"</code>, <code>"unavailable"</code>); <code>"internal_error"</code> when the backend returned no error but produced zero content and zero reasoning; or <code>"reasoning_exhausted"</code> when a reasoning-capable model spent its entire <code>max_tokens</code> budget on <code>reasoning</code> chunks and never produced a <code>delta</code> chunk. One of the <a href="#error-codes">error codes</a>; <code>delta</code> and the summary fields are empty in that case. Omitted on success.</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<h3>ErrorResponse</h3>
+<p>Returned on any 4xx or 5xx response.</p>
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr><th>Field</th><th>Type</th><th>Notes</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="field-name">code</td>
+      <td class="field-type">string</td>
+      <td class="field-desc">Machine-readable error token. See <a href="#error-codes">Error Codes</a>.</td>
+    </tr>
+    <tr>
+      <td class="field-name">message</td>
+      <td class="field-type">string</td>
+      <td class="field-desc">Human-readable description.</td>
+    </tr>
+    <tr>
+      <td class="field-name">correlation_id</td>
+      <td class="field-type">string</td>
+      <td class="field-desc">Omitted when empty.</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<h3>Other endpoints</h3>
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr><th>Endpoint</th><th>Response type</th><th>Key fields</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="field-name">GET /healthz</td>
+      <td class="field-type">HealthResponse</td>
+      <td class="field-desc"><code>status</code> ("ok"), <code>version</code>, <code>uptime_s</code>, <code>state</code> (<code>"ok"</code> or <code>"draining"</code> — see <a href="#admin">Admin / maintenance</a>). Always <code>200</code> while the process is up.</td>
+    </tr>
+    <tr>
+      <td class="field-name">GET /v1/status</td>
+      <td class="field-type">ServerStatus</td>
+      <td class="field-desc">Full snapshot: <code>queue_depth</code>, <code>active_batch_size</code> (jobs in the batcher's un-flushed batch), <code>in_flight</code> (requests currently executing inference), <code>max_parallel</code> (concurrent-inference ceiling), <code>defer_queue_depth</code> (count of relay-deferred jobs in <code>recent_jobs</code>; there is no local defer queue), <code>loaded_model</code> (incl. <code>gpu_layers</code> / <code>total_layers</code>), <code>available_vram_mb</code>, <code>self_vram_mb</code>, <code>cpu_pct</code>, <code>tokens_per_sec</code>, <code>state</code> (<code>"ok"</code>/<code>"draining"</code>), <code>recent_jobs[]</code>, <code>uptime_since</code>, <code>version</code></td>
+    </tr>
+    <tr>
+      <td class="field-name">GET /v1/status/pressure</td>
+      <td class="field-type">PressureSnapshot</td>
+      <td class="field-desc">Lightweight real-time view: <code>timestamp</code>, <code>vram_avail_mb</code>, <code>self_vram_mb</code>, <code>other_vram_mb</code>, <code>cpu_pct</code>, <code>tok_per_sec</code>, <code>active_tier</code>, <code>in_flight</code>, <code>max_parallel</code></td>
+    </tr>
+    <tr>
+      <td class="field-name">GET /v1/model/props</td>
+      <td class="field-type">ModelPropsResponse</td>
+      <td class="field-desc"><code>{"n_ctx": &lt;int&gt;, "model_loaded": bool}</code>. When no model is loaded this returns the configured default (<code>n_ctx</code> 4096, <code>model_loaded: false</code>) — it does <strong>not</strong> spin one up.</td>
+    </tr>
+    <tr>
+      <td class="field-name">POST /v1/tokenize</td>
+      <td class="field-type">TokenizeResponse</td>
+      <td class="field-desc">Body <code>{"text": "..."}</code> → <code>{"tokens": &lt;int&gt;, "n_ctx": &lt;int&gt;, "model_loaded": bool}</code>. With a model loaded, <code>tokens</code> is exact and <code>model_loaded: true</code>; otherwise it is a whitespace-word estimate with <code>model_loaded: false</code> (no model is started).</td>
+    </tr>
+    <tr>
+      <td class="field-name">GET /v1/chats</td>
+      <td class="field-type">ConversationMeta[]</td>
+      <td class="field-desc">List of stored conversations (newest-updated first), each: <code>id</code>, <code>title</code>, <code>created_at</code>, <code>updated_at</code>, <code>turn_count</code>. Up to 5 are kept; the oldest is evicted on overflow. Stored as JSON files on the server host only.</td>
+    </tr>
+    <tr>
+      <td class="field-name">POST /v1/chats</td>
+      <td class="field-type">ConversationMeta</td>
+      <td class="field-desc">Body <code>{"title"?: string, "messages": ChatMessage[]}</code>. Creates a conversation with a server-generated id (use <code>PUT /v1/chats/{id}</code> to control the id). Returns the stored metadata.</td>
+    </tr>
+    <tr>
+      <td class="field-name">GET /v1/chats/{id}</td>
+      <td class="field-type">Conversation</td>
+      <td class="field-desc">Full conversation: <code>id</code>, <code>title</code>, <code>messages[]</code>, <code>created_at</code>, <code>updated_at</code>. 404 if unknown.</td>
+    </tr>
+    <tr>
+      <td class="field-name">PUT /v1/chats/{id}</td>
+      <td class="field-type">ConversationMeta</td>
+      <td class="field-desc">Body <code>{"title"?: string, "messages": ChatMessage[]}</code>. Creates or replaces the conversation; an empty title is derived from the first user message. Returns the stored metadata.</td>
+    </tr>
+    <tr>
+      <td class="field-name">DELETE /v1/chats/{id}</td>
+      <td class="field-type">—</td>
+      <td class="field-desc">Removes the conversation and its file. <code>204</code> (also for an unknown id).</td>
+    </tr>
+    <tr>
+      <td class="field-name">GET /v1/logs</td>
+      <td class="field-type">{ logs: LogRecord[] }</td>
+      <td class="field-desc">In-memory log buffer, newest-first. Query params: <code>level</code> (<code>ERROR</code>|<code>WARN</code>|<code>INFO</code>|<code>DEBUG</code>, case-insensitive; omit for all), <code>event</code> (a <a href="#error-codes">logschema</a> event kind, e.g. <code>job.failed</code>; omit for all), <code>since</code> (Go duration such as <code>1h</code>/<code>12h</code>/<code>24h</code>; default and hard cap <code>24h</code>), <code>limit</code> (default 500, max 2000). Each <code>LogRecord</code>: <code>time</code>, <code>level</code>, <code>msg</code>, <code>event</code> (if present), <code>attrs</code> (map of the remaining structured fields, stringified). Returns <code>501</code> if the buffer is not wired. Buffer holds the last 5000 records (or 24h, whichever is smaller) and is <strong>not persisted</strong> — it empties on restart. Backs the Logs UI at <code>GET /logs</code>.</td>
+    </tr>
+    <tr>
+      <td class="field-name">GET /v1/admin<br>POST /v1/admin/{drain,resume,restart}</td>
+      <td class="field-type">AdminStateResponse</td>
+      <td class="field-desc"><strong>Loopback-only</strong> — a request from any non-loopback address gets <code>404</code> (the endpoints are invisible from the LAN). See <a href="#admin">Admin / maintenance</a>. All four return <code>{"state", "in_flight", "queue_depth"}</code>. <code>GET /v1/admin</code> is a read-only state probe; <code>restart</code> returns <code>501</code> if the process was not started with a restart channel wired (only <code>cmd/server</code> wires it).</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+<p>A single-method path hit with the wrong method returns <code>405</code> with an
+<code>Allow</code> header (e.g. <code>GET /v1/infer</code>). An unknown path is
+<code>404</code>.</p>
+<p><strong>Browser pages</strong> (not API): <code>GET /</code> or <code>/dashboard</code>
+(live status; shows a "Draining" banner when the server is drained),
+<code>/chat</code> (chat UI), <code>/logs</code> (event log),
+<code>/admin</code> (Drain / Resume / Restart buttons — <strong>only functional
+when opened on the server itself</strong>; every control returns <code>404</code>
+from a non-loopback device, see <a href="#admin">Admin / maintenance</a>),
+<code>/docs</code> (this page), <code>/vendor/*</code> (the chat UI's embedded
+markdown libraries).</p>
+<p>The <code>/v1/chats*</code>, <code>/v1/tokenize</code>, and <code>/v1/model/props</code> endpoints back the built-in chat UI at <code>GET /chat</code>. Chat persistence is local to the server host (default <code>%LOCALAPPDATA%\home-inference-server\chats\</code>, override with <code>--chats-dir</code> or <code>CHATS_DIR</code>); nothing leaves the machine. The <code>/v1/logs</code> endpoint backs the Logs UI at <code>GET /logs</code>.</p>
+
+<h3>Running on a LAN</h3>
+<p>The local API is <strong>unauthenticated by default</strong>. To expose it
+beyond localhost, set:</p>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Env var</th><th>Effect</th></tr></thead>
+  <tbody>
+    <tr><td class="field-name">HIS_API_KEY</td><td>When set, non-loopback callers to <code>/v1/*</code> must send <code>X-API-Key: &lt;value&gt;</code> (loopback is exempt — the dashboard/chat keep working locally). Missing/wrong key → <code>401</code>.</td></tr>
+    <tr><td class="field-name">HIS_CORS_ORIGINS</td><td>Comma-separated allow-list of browser <code>Origin</code>s. When set, matching origins get <code>Access-Control-*</code> headers and <code>OPTIONS</code> preflight is answered. Unset = no CORS (same-origin only).</td></tr>
+    <tr><td class="field-name">HIS_BIND_ADDR</td><td>Listen address; default <code>:PORT</code> (all interfaces). Set <code>127.0.0.1:8080</code> to keep it local-only.</td></tr>
+    <tr><td class="field-name">HIS_INFER_TIMEOUT_MS</td><td>Per-request inference deadline when <code>timeout_ms</code> is omitted. Default <code>600000</code>.</td></tr>
+    <tr><td class="field-name">HIS_MAX_PARALLEL</td><td>Concurrent-inference degree: the <code>llama-server --parallel</code> value, the worker-pool size, and the backend semaphore capacity. Default <code>2</code>. Sized for an 8&nbsp;GB card; raising it needs VRAM for one more KV cache per tier.</td></tr>
+    <tr><td class="field-name">HIS_CTX_SIZE</td><td>llama-server <code>--ctx-size</code> (shared across the <code>--parallel</code> slots). Default <code>4096</code>; the roster's KV estimates are tuned for this value.</td></tr>
+  </tbody>
+</table>
+</div>
+<p>The Chat UI renders assistant replies as markdown (headers, bold/italic, lists, tables, code blocks, blockquotes) using two vendored, embedded libraries served from <code>GET /vendor/*</code> — <code>marked</code> (markdown → HTML) and <code>DOMPurify</code> (HTML sanitizer, strips scripts/event handlers/<code>javascript:</code> URLs from the parsed output before it reaches the DOM, since the HTML originates from model output, not a trusted source). Both are bundled in the binary; nothing is fetched over the network at runtime — the Chat UI works fully offline.</p>
+
+<h3 id="admin">Admin / maintenance</h3>
+<p>A small <strong>loopback-only</strong> control surface for pausing and
+restarting the server without killing the process. Every <code>/v1/admin/*</code>
+endpoint returns <code>404</code> to a non-loopback caller, so it is invisible
+from the LAN even when the API itself is exposed. No key — being on
+<code>127.0.0.1</code> is the whole gate.</p>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Call</th><th>Effect</th></tr></thead>
+  <tbody>
+    <tr><td class="field-name">GET /v1/admin</td><td>State probe: <code>{"state", "in_flight", "queue_depth"}</code>. No side effect.</td></tr>
+    <tr><td class="field-name">POST /v1/admin/drain</td><td>Enter <em>draining</em>: new <code>POST /v1/infer</code> (blocking <em>and</em> streaming) returns <code>503</code> <code>{"code":"draining"}</code>; the offline-queue worker stops claiming new relay jobs. <strong>Requests already in flight finish normally</strong>, and every read-only endpoint (<code>/healthz</code>, <code>/v1/status</code>, <code>/v1/logs</code>, <code>/v1/chats*</code>, <code>/v1/tokenize</code>) keeps working. Idempotent.</td></tr>
+    <tr><td class="field-name">POST /v1/admin/resume</td><td>Leave draining: inference is served again, the offline worker resumes claiming.</td></tr>
+    <tr><td class="field-name">POST /v1/admin/restart</td><td>Drain, then run the normal 15 s shutdown (stop HTTP, evict the model, kill <code>llama-server</code>), write a <code>restart.flag</code> next to the executable, and exit <code>0</code>. On the standard Windows deploy, <code>run.cmd</code> is a loop that sees the flag and relaunches the binary (picking up a freshly staged build). Returns <code>501</code> if the process was not started with a restart channel (only <code>cmd/server</code> wires one). A deliberate <code>Stop-ScheduledTask</code> kills the whole tree, so the loop cannot outlive an intentional stop.</td></tr>
+  </tbody>
+</table>
+</div>
+<p>While draining, <code>GET /healthz</code> and <code>GET /v1/status</code> report
+<code>"state": "draining"</code> — <code>/healthz</code> stays <code>200</code>
+(liveness), the field is the readiness signal. Drain does not auto-expire; it
+persists until <code>/v1/admin/resume</code> or a restart. The read-only
+dashboard at <code>GET /</code> shows a "Draining" banner while this is set.</p>
+<p>The <code>GET /admin</code> browser page is a button UI for these same three
+calls — same loopback restriction (it will not work from another device). It is
+the GUI equivalent of the <code>curl -X POST http://localhost:PORT/v1/admin/*</code>
+examples.</p>
+</section>
+
+<!-- ─── Streaming Guide ──────────────────────────────────────────────── -->
+<section id="streaming">
+<h2>Streaming Guide</h2>
+
+<p>Set <code>"stream": true</code> in the request body. The response will be <code>Content-Type: text/event-stream</code> (Server-Sent Events). Each event is a JSON-encoded <code>StreamChunk</code> prefixed with <code>data: </code>.</p>
+
+<h3>Event format</h3>
+<pre><code>data: {"request_id":"...","correlation_id":"...","delta":"Hello","done":false}
+
+data: {"request_id":"...","correlation_id":"...","delta":" world","done":false}
+
+data: {"request_id":"...","correlation_id":"...","delta":"","done":true,"tokens_generated":42,"tokens_per_sec":11.3,"queue_wait_ms":2,"inference_ms":3710,"duration_ms":3712,"model_tier":"strong"}
+
+data: [DONE]</code></pre>
+
+<p>The stream ends with a literal <code>data: [DONE]</code> line after the final chunk.</p>
+<p>If inference fails mid-stream, the final chunk instead carries an <code>error</code> field (e.g. <code>{"...","done":true,"error":"overloaded"}</code>) with no summary fields, followed by <code>data: [DONE]</code>. Check <code>chunk.error</code> before treating a <code>done</code> chunk as success. A completion that returns no backend error but yields zero content and zero reasoning also terminates with <code>"error":"internal_error"</code> rather than an empty success chunk — a bare <code>done</code> chunk with no <code>error</code> always means at least one <code>delta</code> chunk was produced.</p>
+
+<h3>Reasoning models</h3>
+<p>A reasoning-capable model (e.g. Gemma's "thinking" mode) streams its chain-of-thought under a separate <code>reasoning</code> field on each chunk, never mixed into <code>delta</code>:</p>
+<pre><code>data: {"request_id":"...","correlation_id":"...","reasoning":"Let me think","done":false}
+
+data: {"request_id":"...","correlation_id":"...","reasoning":" about this...","done":false}
+
+data: {"request_id":"...","correlation_id":"...","delta":"The answer is 4.","done":false}
+
+data: {"request_id":"...","correlation_id":"...","done":true,"tokens_generated":18,...}
+
+data: [DONE]</code></pre>
+<p>Render <code>reasoning</code> chunks separately from <code>delta</code> chunks — the built-in Chat UI shows them in a collapsible "Thinking…" section that auto-collapses once the first <code>delta</code> chunk arrives, matching llama-server's own chat UI. A hard prompt can cause a reasoning model to spend its entire <code>max_tokens</code> budget thinking and never produce a visible answer; when that happens the stream ends with <code>"error":"reasoning_exhausted"</code> instead of a silent empty success (see <a href="#error-codes">Error Codes</a>). The non-streaming <code>POST /v1/infer</code> response carries the same distinction via <code>InferResponse.reasoning</code>, separate from <code>output</code>.</p>
+
+<h3>JavaScript consumer example</h3>
+<pre><code>const res = await fetch('/v1/infer', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    modality: 'text',
+    text_input: { prompt: 'Tell me a story.' },
+    stream: true,
+  }),
+});
+
+const reader = res.body.getReader();
+const decoder = new TextDecoder();
+let output = '';
+
+while (true) {
+  const { done, value } = await reader.read();
+  if (done) break;
+  const text = decoder.decode(value, { stream: true });
+  for (const line of text.split('\n')) {
+    if (!line.startsWith('data: ') || line === 'data: [DONE]') continue;
+    const chunk = JSON.parse(line.slice(6));
+    if (chunk.error) throw new Error(chunk.error);
+    if (chunk.delta) output += chunk.delta;
+    if (chunk.done) console.log('Summary:', chunk);
+  }
+}
+console.log('Full output:', output);</code></pre>
+
+<div class="note">
+  The streaming path bypasses the batcher and the worker pool — the request goes directly to the backend. It still contends for one of the <code>max_parallel</code> concurrent-inference slots (the same semaphore the pooled requests use), and shares the VRAM-tier selection and pressure-policy logic.
+</div>
+</section>
+
+<!-- ─── Pressure Policy ──────────────────────────────────────────────── -->
+<section id="pressure-policy">
+<h2>Pressure Policy</h2>
+
+<p>The server monitors VRAM headroom and CPU utilisation in real time. Under extreme load it <strong>defers a request to the hosted relay</strong> (the durable Railway queue) rather than overloading the model or dropping the request.</p>
+
+<h3>Deferral (enqueue-time check)</h3>
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr><th>Condition</th><th>Effect</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>VRAM &lt; 500 MB <strong>AND</strong> CPU &gt; 90% <span class="field-desc">(and a relay is configured)</span></td>
+      <td>The request is forwarded to the relay's <code>/enqueue</code>. Response is <code>202 Accepted</code> with <code>{"deferred": true, "request_id": &lt;relay job id&gt;, "result_url": "&lt;relay&gt;/result/&lt;id&gt;"}</code>. Poll <code>result_url</code> (see <a href="#remote-access">Remote Access</a>) — it survives a PC restart. If the relay is unreachable at that moment the server returns <code>503 overloaded</code> instead. With no relay configured (<code>RAILWAY_QUEUE_URL</code> unset) the server never defers — it serves, cascades tiers, or <code>503</code>s from the local queue.</td>
+    </tr>
+    <tr>
+      <td><code>priority = "high"</code></td>
+      <td>Always bypasses deferral. Served on Weak tier if necessary; response carries <code>X-Quality-Degraded: true</code> header.</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<p>A deferred job re-enters processing through the same offline-queue worker that
+drains F&amp;F jobs — immediately once pressure clears, or after the PC restarts.
+There is no local defer queue and no local drain loop.</p>
+
+<h3>Idle eviction &amp; external VRAM pressure</h3>
+<p>The loaded model is evicted after 20 s idle, on a tier switch, or when an external process claims enough VRAM that the model can no longer be reloaded. The external-pressure check compares free VRAM against the model's full GPU-resident footprint (<code>weight + KV/compute overhead</code>) <em>plus</em> that footprint added back — free VRAM reported by the driver already excludes the running model's own allocation, so the check asks "would this still fit if reloaded now?" rather than "is free VRAM below the raw weight size?". Eviction for external pressure also requires free VRAM to have fallen below an 800 MB absolute floor, so a model simply occupying most of the card is never mistaken for external contention. A model whose subprocess is mid-restart after a connection error is never evicted until the restart settles.</p>
+
+<h3>Speed floors</h3>
+<p>After each completed job the server updates a rolling tok/sec average for the loaded tier. Each sample is normalised for the number of requests that were running concurrently at the time (llama-server time-slices its <code>--parallel</code> slots roughly evenly), so the average tracks a single-stream-equivalent rate rather than sagging under load. If the observed speed drops below a priority floor, the router falls back to a lower-VRAM tier that can sustain the required throughput.</p>
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr><th>Priority</th><th>Minimum tok/sec</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>high</code></td><td>8 tok/sec</td></tr>
+    <tr><td><code>normal</code></td><td>4 tok/sec</td></tr>
+    <tr><td><code>low</code></td><td>no floor</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>Speed floors are only enforced once the rolling average has at least one sample — new model loads receive the benefit of the doubt.</p>
+</section>
+
+<!-- ─── Error Codes ───────────────────────────────────────────────────── -->
+<section id="error-codes">
+<h2>Error Codes</h2>
+
+<p>All error responses have HTTP status codes and a JSON body with a machine-readable <code>code</code> field.</p>
+
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr><th>Code</th><th>HTTP</th><th>Cause</th><th>Recommended Action</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="field-name">invalid_request</td>
+      <td>400</td>
+      <td class="field-desc">Malformed JSON, missing required field, or empty prompt/messages.</td>
+      <td class="field-desc">Fix the request body.</td>
+    </tr>
+    <tr>
+      <td class="field-name">invalid_modality</td>
+      <td>400</td>
+      <td class="field-desc"><code>modality</code> is a non-empty value other than <code>"text"</code> or <code>"vision"</code>. (A missing <code>modality</code> is <code>invalid_request</code>.)</td>
+      <td class="field-desc">Use <code>"text"</code> or <code>"vision"</code>.</td>
+    </tr>
+    <tr>
+      <td class="field-name">not_implemented</td>
+      <td>501</td>
+      <td class="field-desc"><code>modality: "vision"</code> — vision inference is not wired up in this build.</td>
+      <td class="field-desc">Use <code>"text"</code>; vision is on the roadmap.</td>
+    </tr>
+    <tr>
+      <td class="field-name">unauthorized</td>
+      <td>401</td>
+      <td class="field-desc">Missing or invalid <code>X-API-Key</code>. On the <em>local</em> server only when <code>HIS_API_KEY</code> is set and the caller is not on loopback; also the relay's response to a bad credential.</td>
+      <td class="field-desc">Send the correct <code>X-API-Key</code> (or a valid relay Bearer token).</td>
+    </tr>
+    <tr>
+      <td class="field-name">overloaded</td>
+      <td>429 / 503</td>
+      <td class="field-desc">No tier can be loaded (not even CPU-only), a <code>min_tier</code> floor can't be met (429), or a deferral is needed but the relay is unreachable (503).</td>
+      <td class="field-desc">Retry with exponential backoff, lower <code>min_tier</code>, or pick a smaller <code>preferred_tier</code>.</td>
+    </tr>
+    <tr>
+      <td class="field-name">draining</td>
+      <td>503</td>
+      <td class="field-desc">A new <code>POST /v1/infer</code> arrived while the server is draining for maintenance (<code>POST /v1/admin/drain</code>). Read-only endpoints are unaffected.</td>
+      <td class="field-desc">Retry after <code>GET /healthz</code> reports <code>"state":"ok"</code> again.</td>
+    </tr>
+    <tr>
+      <td class="field-name">not_found</td>
+      <td>404</td>
+      <td class="field-desc"><em>Remote relay only.</em> <code>GET /result/{id}</code> — unknown id, another caller's job, or a result aged past <code>RESULT_TTL_SECONDS</code>.</td>
+      <td class="field-desc">Check the id; fetch results within the TTL (default 1 h).</td>
+    </tr>
+    <tr>
+      <td class="field-name">model_load_failed</td>
+      <td>503</td>
+      <td class="field-desc">The llama-server subprocess failed to start or load model weights.</td>
+      <td class="field-desc">Check server logs; verify the model file exists.</td>
+    </tr>
+    <tr>
+      <td class="field-name">internal_error</td>
+      <td>500</td>
+      <td class="field-desc">Unexpected server-side error.</td>
+      <td class="field-desc">Check server logs.</td>
+    </tr>
+    <tr>
+      <td class="field-name">reasoning_exhausted</td>
+      <td>—<sup>†</sup></td>
+      <td class="field-desc">A reasoning-capable model spent its entire <code>max_tokens</code> budget on <code>reasoning</code> chunks and never produced a <code>delta</code> chunk. See the <a href="#streaming">Streaming Guide</a>.</td>
+      <td class="field-desc">Retry, ask something more specific, or raise <code>max_tokens</code>.</td>
+    </tr>
+    <tr>
+      <td class="field-name">unavailable</td>
+      <td>503 / 501</td>
+      <td class="field-desc">A backend or capability is not available: no backend for the modality, a wedged subprocess, or (<code>501</code>) <code>/v1/tokenize</code> / <code>/v1/logs</code> called before that feature is wired.</td>
+      <td class="field-desc">Retry; check the server configuration and roster.</td>
+    </tr>
+    <tr>
+      <td class="field-name">timeout</td>
+      <td>408</td>
+      <td class="field-desc">Inference exceeded <code>timeout_ms</code> or the server default (<code>HIS_INFER_TIMEOUT_MS</code>, 600 s).</td>
+      <td class="field-desc">Retry or increase <code>timeout_ms</code>.</td>
+    </tr>
+    <tr>
+      <td class="field-name">rate_limited</td>
+      <td>429</td>
+      <td class="field-desc"><em>Remote relay only.</em> Per-identity token bucket exhausted (~10 jobs/min).</td>
+      <td class="field-desc">Back off a few seconds and retry.</td>
+    </tr>
+    <tr>
+      <td class="field-name">quota_exceeded</td>
+      <td>429</td>
+      <td class="field-desc"><em>Remote relay only.</em> Per-identity daily job quota reached (~200/day).</td>
+      <td class="field-desc">Wait until UTC midnight; the counter resets daily.</td>
+    </tr>
+    <tr>
+      <td class="field-name">queue_full</td>
+      <td>503</td>
+      <td class="field-desc"><em>Remote relay only.</em> Pending queue depth is at its cap (~500) — the PC isn't draining fast enough.</td>
+      <td class="field-desc">Retry later; the backlog clears as the PC processes it.</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+<p><sup>†</sup> <code>reasoning_exhausted</code> is stream-only — it never appears as an HTTP status or on <code>POST /v1/infer</code> without <code>stream: true</code>; it is only ever the <code>error</code> field of a streaming <code>StreamChunk</code>.</p>
+</section>
+
+<!-- ─── Model Roster ─────────────────────────────────────────────────── -->
+<section id="model-roster">
+<h2>Model Roster</h2>
+
+<p>The server loads one model at a time. Text and vision each have their own tier list; the tables below are the text roster plus the vision tier. Every tier can run fully on GPU, split across GPU + system RAM, or entirely on CPU — the split is chosen at load time from current free VRAM.</p>
+
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr><th>Tier</th><th>Model</th><th>Weight (Q4_K_M)</th><th>Modality</th><th>Role</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><span class="badge badge-done">strong</span></td>
+      <td class="field-name">gemma-4-e4b-q4_k_m</td>
+      <td>4747 MB</td>
+      <td>text</td>
+      <td class="field-desc">Primary for all requests when it fits on GPU (roughly 6 GB free at <code>max_parallel = 2</code> — weight plus two KV caches). Under pressure it partial-offloads before dropping tier.</td>
+    </tr>
+    <tr>
+      <td><span class="badge badge-queued">mid</span></td>
+      <td class="field-name">gemma-4-e2b-q4_k_m</td>
+      <td>2963 MB</td>
+      <td>text</td>
+      <td class="field-desc">Same Gemma 4 family as Strong. Selected when Strong can't fit even a partial GPU split, or when Strong's speed drops below the priority floor.</td>
+    </tr>
+    <tr>
+      <td><span class="badge badge-normal">weak</span></td>
+      <td class="field-name">qwen2.5-3b-instruct</td>
+      <td>1930 MB</td>
+      <td>text</td>
+      <td class="field-desc">Small but capable last resort (strong coding for its size, 32K context). Partial-splits down to roughly 1.5 GB free VRAM (at <code>max_parallel = 2</code>); the final tier before deferral.</td>
+    </tr>
+    <tr>
+      <td><span class="badge badge-normal">weak</span></td>
+      <td class="field-name">smolvlm2-500m-q8_0</td>
+      <td>437 MB</td>
+      <td>vision</td>
+      <td class="field-desc">The vision tier. Minimal footprint; used for all <code>modality: "vision"</code> requests.</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<h3>Tier selection algorithm</h3>
+<p>Per request, on the roster for the request's modality:</p>
+<ol style="color:#a1a1aa; line-height:2; padding-left:20px; margin-bottom:10px;">
+  <li><b>Pinned tier (if <code>preferred_tier</code> is set).</b> Skip steps 1–3 entirely — load exactly the requested tier, evicting a different already-loaded tier if needed. Never cascades away from it, even if that tier fails the speed floor.</li>
+  <li><b>Fit, largest first.</b> For each tier (largest weight first) compute the GPU/CPU layer split for current free VRAM, then the GPU-resident footprint (on-GPU weight fraction + the model's non-weight overhead). The non-weight overhead is <code>KVCacheMB × N + KVFixedMB</code>, where <code>N</code> is <code>max_parallel</code> (the concurrent-inference degree, default 2) — each of llama-server's <code>--parallel</code> slots holds its own KV cache, while the compute buffers and CUDA context are counted once. Admit the first tier whose footprint + 10% buffer fits.</li>
+  <li><b>CPU fallback.</b> If no tier fits any GPU layers, load the smallest tier whose non-weight overhead alone fits, with all weights in system RAM.</li>
+  <li><b>Speed-floor cascade.</b> If the chosen tier's rolling tok/sec is below the priority floor (high = 8, normal = 4, low = none), drop to the next-smaller tier and re-select. <code>min_tier</code> caps how far this can drop; a request pinned to a tier it can't speed-satisfy is served there (degraded) rather than failing.</li>
+  <li><b>OOM cascade.</b> If the chosen tier's subprocess actually fails to load (CUDA OOM at spawn), it is evicted and the next-smaller tier is tried — bounded by <code>min_tier</code> and skipped for a <code>preferred_tier</code> pin.</li>
+  <li><b>Deferral.</b> If free VRAM &lt; 500 MB AND CPU &gt; 90% and a relay is configured, the request is handed to the relay (<code>202</code>, see <a href="#pressure-policy">Pressure Policy</a>) unless <code>priority = "high"</code>.</li>
+  <li><b>Overloaded.</b> Returned when not even a CPU-only load of the smallest tier fits, when <code>min_tier</code> can't be met, or when a deferral is needed but the relay is unreachable.</li>
+</ol>
+
+<p>The active split is visible on <code>GET /v1/status</code> as <code>loaded_model.gpu_layers</code> / <code>total_layers</code> (<code>-1</code> = full GPU, <code>0</code> = CPU-only) and on the dashboard's Active Tier card.</p>
+
+<h3>Subprocess lifecycle</h3>
+<p>Each tier runs as a managed <code>llama-server</code> subprocess, spawned with <code>--parallel N --cont-batching</code> (<code>N</code> = <code>max_parallel</code>, from <code>HIS_MAX_PARALLEL</code>, default 2) so one process serves up to N requests concurrently via continuous batching. A bounded worker pool of N workers feeds it; a semaphore inside the backend is the hard ceiling and also gates the streaming path. Evicting a model (20 s idle, tier switch, or VRAM pressure) shuts its subprocess down so it stops holding VRAM and RAM. A port-scoped reaper additionally kills any stray <code>llama-server</code> left on a roster port by a previous crash — on startup and whenever nothing is loaded. On Windows each subprocess is placed in a kill-on-close job object, so the whole tree dies even if the server is force-killed.</p>
+
+<p><code>GET /v1/status</code> and <code>GET /v1/status/pressure</code> report <code>self_vram_mb</code> (VRAM held by the server's own subprocesses) and, when total VRAM is known, <code>other_vram_mb</code> (what other applications are using).</p>
+</section>
+
+<!-- ─── Remote Access ───────────────────────────────────────────────── -->
+<section id="remote-access">
+<h2>Remote Access (Hosted Relay)</h2>
+
+<p>Apps that aren't on this machine's network — phones, friends-and-family devices, browser web apps — don't call this server directly. They call a <strong>hosted relay</strong> on Railway that queues jobs in Postgres. This PC makes only <em>outbound</em> long-poll connections to the relay, claims jobs, runs them through the same local pipeline, and posts results back. If the PC is offline the job waits in the queue and drains on the next reconnect — the app polls either way and never has to know.</p>
+
+<p>The relay's base URL is your Railway service URL, not <code>localhost</code>. The local <code>/v1/*</code> API on this page is unchanged and still only reachable on the LAN.</p>
+
+<h3>Authentication</h3>
+<p>Every relay request carries <strong>either</strong> header:</p>
+<ul>
+  <li><code>Authorization: Bearer &lt;token&gt;</code> — a <strong>Neon Auth</strong> access token. The app signs the user in with the Neon Auth (Stack Auth) client SDK — magic link or OAuth, hosted by Neon, no email server of your own — and forwards the token it gets back. The relay verifies it against Stack Auth's published JWKS (ES256).</li>
+  <li><code>X-API-Key: &lt;key&gt;</code> — the static relay key. For native apps, CLI tools, and the PC worker.</li>
+</ul>
+<p>Both resolve to an <em>identity</em> that scopes result retrieval and drives the per-identity rate limit and daily quota. Missing or invalid credentials return <code>401 unauthorized</code>; a valid Neon Auth token whose user has not been added to the relay's invite list returns <code>403</code>. Either way nothing is written first.</p>
+
+<h3>Wiring up an app</h3>
+<p>You do <strong>not</strong> deploy or proxy an auth server. Neon Auth (Stack Auth) hosts sign-in, the magic-link / OAuth email, token issuing, and token refresh at <code>api.stack-auth.com</code>. Your app talks to it directly with the client SDK; the relay only ever sees the finished token.</p>
+
+<h4>1. Config the app needs</h4>
+<p>Both values are safe to ship in client-side code:</p>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Name</th><th>Value</th></tr></thead>
+  <tbody>
+    <tr><td class="field-name">Project ID</td><td><code>7084ebf8-2193-429d-86a1-2782c2a59054</code></td></tr>
+    <tr><td class="field-name">Publishable client key</td><td><code>pck_pyztaxtbbd44y354nnqjb5zngbaw1e9tkhkb9emt1066g</code></td></tr>
+    <tr><td class="field-name">Relay base URL</td><td>your Railway <code>queue-api</code> URL, e.g. <code>https://queue-api-production-4dfb.up.railway.app</code></td></tr>
+  </tbody>
+</table>
+</div>
+<p>The relay's own env (<code>STACK_JWKS_URL</code>, <code>STACK_PROJECT_ID</code>) is already set from these — nothing to configure per app on the relay side.</p>
+
+<h4>2. Install the SDK &amp; sign the user in</h4>
+<pre><code>npm install @stackframe/stack        # or the framework-specific Neon Auth package
+
+// one-time client setup
+import { StackClientApp } from "@stackframe/stack";
+const stackApp = new StackClientApp({
+  projectId:            "7084ebf8-2193-429d-86a1-2782c2a59054",
+  publishableClientKey: "pck_pyztaxtbbd44y354nnqjb5zngbaw1e9tkhkb9emt1066g",
+  tokenStore:           "cookie",     // or "localStorage"
+});
+
+// the SDK renders sign-in UI and handles the magic-link email itself.
+// after the user is signed in:
+const user  = await stackApp.getUser({ or: "redirect" });
+const { accessToken } = await user.getAuthJson();</code></pre>
+
+<h4>3. Call the relay with the token</h4>
+<pre><code>async function infer(prompt) {
+  const { accessToken } = await user.getAuthJson();   // SDK refreshes it as needed
+  const enq = await fetch(`${RELAY_URL}/enqueue`, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${accessToken}`,
+      "Content-Type":  "application/json",
+    },
+    body: JSON.stringify({
+      correlation_id: crypto.randomUUID(),
+      payload: { modality: "text", text_input: { prompt } },
+    }),
+  });
+  if (enq.status === 403) throw new Error("you're not on the invite list yet");
+  const { id } = await enq.json();
+
+  // poll until terminal
+  for (;;) {
+    const r = await fetch(`${RELAY_URL}/result/${id}`, {
+      headers: { "Authorization": `Bearer ${accessToken}` },
+    });
+    const body = await r.json();
+    if (body.status === "done")   return body.result_payload.output;
+    if (body.status === "failed") throw new Error(body.error_code);
+    await new Promise(res => setTimeout(res, 1500));   // pending → PC busy or asleep
+  }
+}</code></pre>
+<p>Check <code>GET /status</code> first if you want to show "PC is offline, this will process later" before the user submits.</p>
+
+<h3>Endpoints</h3>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Endpoint</th><th>Body / Params</th><th>Response</th></tr></thead>
+  <tbody>
+    <tr>
+      <td class="field-name">POST /enqueue</td>
+      <td class="field-desc"><code>{ "correlation_id": string, "payload": &lt;InferRequest&gt;, "max_attempts"?: int }</code>. <code>payload</code> is a full <code>POST /v1/infer</code> body. Body capped at ~64&nbsp;KB. The relay generates the job id.</td>
+      <td class="field-desc"><code>201 { "id": string }</code>. <code>503 queue_full</code> if the backlog is at its cap; <code>429 rate_limited</code> / <code>429 quota_exceeded</code> on limit breach.</td>
+    </tr>
+    <tr>
+      <td class="field-name">GET /result/{id}</td>
+      <td class="field-desc">Path id from the enqueue response. Scoped to the calling identity.</td>
+      <td class="field-desc"><code>200 { "status": "pending"|"processing"|"done"|"failed", "result_payload"?: &lt;InferResponse|ErrorResponse&gt;, "error_code"?: string }</code>. <code>404</code> for an unknown id <em>or</em> a job belonging to another identity (indistinguishable by design).</td>
+    </tr>
+    <tr>
+      <td class="field-name">GET /status</td>
+      <td class="field-desc">—</td>
+      <td class="field-desc"><code>200 { "pc_connected": bool, "last_claim_at"?: RFC3339, "pending_depth": int }</code>. <code>pc_connected</code> is true when the PC worker has polled <code>/claim</code> (heartbeat, whether or not it got a job) or claimed one within the last ~60&nbsp;s — so a connected-but-idle PC still reads as connected.</td>
+    </tr>
+    <tr>
+      <td class="field-name">GET /healthz</td>
+      <td class="field-desc">—</td>
+      <td class="field-desc"><code>200 OK</code>. No auth required.</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<h3>Client pattern</h3>
+<pre><code># TOKEN comes from the Neon Auth client SDK after the user signs in.
+
+# enqueue
+curl -X POST https://&lt;relay&gt;/enqueue \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"correlation_id":"c-1","payload":{"modality":"text","text_input":{"prompt":"hello"}}}'
+# -> {"id":"a1b2c3..."}
+
+# poll until terminal
+curl -H "Authorization: Bearer $TOKEN" https://&lt;relay&gt;/result/a1b2c3...
+# -> {"status":"pending"}      (PC offline or job still queued)
+# -> {"status":"done","result_payload":{"output":"Hi there!", ...}}
+</code></pre>
+
+<p>A <code>status</code> of <code>pending</code> for a while just means the PC is asleep — show "will process when the PC is back online" and keep polling. Results are purged from the relay ~1&nbsp;hour after completion.</p>
+
+<h3>Membership (invite-only)</h3>
+<p>Neon Auth's sign-up is open — anyone can create an account — but that alone gets a caller nothing. The relay rejects (<code>403 "not an invited member"</code>) any token whose Stack Auth user id is not in its <code>allowed_members</code> table. Neon Auth mirrors every account into the relay's database as <code>neon_auth.users_sync</code>; <code>memberadd</code> looks a person up there by email (so they must have signed in at least once) and adds them:</p>
+<pre><code>DATABASE_URL=… go run ./cmd/memberadd -email them@example.com            # add
+DATABASE_URL=… go run ./cmd/memberadd -email them@example.com -remove    # revoke
+DATABASE_URL=… go run ./cmd/memberadd -list                             # show the list</code></pre>
+<p>Onboarding order for a new person: they open the app and sign in once → you run <code>memberadd -email …</code> → their next request succeeds.</p>
+
+<h3>How the relay verifies a token</h3>
+<p>On the first Bearer request the relay fetches Stack Auth's public keys (JWKS) and caches them. Per request it then: checks the JWT is <code>ES256</code> (rejects <code>alg:none</code>), verifies the signature against the cached key for the token's <code>kid</code> (refetching once if the key id is new — key rotation), checks the issuer is this project and the token is unexpired, then looks the subject up in <code>allowed_members</code>. A forged token — even one with a real-looking <code>kid</code> and the correct issuer — fails the signature check and gets <code>401</code>.</p>
+
+<div class="note">
+  <strong>Privacy:</strong> every prompt and completion that goes through the
+  relay — including a request the local server <em>deferred</em> under pressure —
+  is written to the relay's Postgres (Neon) and is readable by anyone with
+  database access until the TTL sweep (<code>RESULT_TTL_SECONDS</code>, default
+  1&nbsp;h). Payloads are not encrypted at rest. Don't send secrets through the
+  relay path.
+</div>
+</section>
+
+<!-- ─── Specialist Backends ──────────────────────────────────────────── -->
+<section id="specialist-backends">
+<h2>Specialist Backends</h2>
+
+<p>The router dispatches by <code>modality</code> string to a registered backend. Additional specialist backends — code completion, embeddings, speech-to-text — can be registered as new modality keys without changing the request/response contract or the core pipeline.</p>
+
+<p>When a specialist backend is added it will be documented here with its modality string, accepted input fields, and response shape. Requests for an unregistered modality return <code>503 unavailable</code>.</p>
+
+<p style="color:#52525b;">No specialist backends are registered in the current build.</p>
+</section>
+
+</body>
+</html>

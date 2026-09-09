@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Admin — Home Inference Server</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: ui-monospace, "SF Mono", Consolas, monospace;
+    font-size: 13px;
+    background: #0d0d0f;
+    color: #d4d4d8;
+    min-height: 100vh;
+    padding: 24px;
+  }
+
+  header {
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+    margin-bottom: 20px;
+    border-bottom: 1px solid #27272a;
+    padding-bottom: 16px;
+  }
+
+  header h1 { font-size: 16px; font-weight: 600; color: #f4f4f5; }
+  .meta { color: #71717a; font-size: 12px; }
+  header a { font-size: 11px; color: #71717a; text-decoration: none; }
+  header a:hover { color: #d4d4d8; }
+
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .badge-ok         { background: #14532d; color: #86efac; }
+  .badge-draining   { background: #422006; color: #fdba74; }
+  .badge-restarting { background: #27272a; color: #a1a1aa; }
+
+  #admin-notice {
+    background: #1c1409;
+    border: 1px solid #78350f;
+    border-radius: 6px;
+    padding: 12px 16px;
+    margin-bottom: 20px;
+    color: #fdba74;
+    font-size: 12px;
+  }
+
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 12px;
+    margin-bottom: 24px;
+  }
+  .stat {
+    background: #18181b;
+    border: 1px solid #27272a;
+    border-radius: 6px;
+    padding: 14px 16px;
+  }
+  .stat-label { font-size: 11px; color: #71717a; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px; }
+  .stat-value { font-size: 20px; font-weight: 600; color: #f4f4f5; }
+  .stat-sub { font-size: 11px; color: #71717a; margin-top: 4px; }
+
+  .section-title { font-size: 12px; color: #71717a; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 10px; }
+
+  .controls { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+  button {
+    font-family: inherit;
+    font-size: 13px;
+    padding: 10px 20px;
+    border-radius: 6px;
+    border: 1px solid #3f3f46;
+    background: #27272a;
+    color: #f4f4f5;
+    cursor: pointer;
+  }
+  button:hover:not(:disabled) { background: #3f3f46; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  #btn-restart { border-color: #7f1d1d; }
+  #btn-restart:hover:not(:disabled) { background: #450a0a; }
+
+  #action-line { font-size: 12px; color: #a1a1aa; min-height: 18px; }
+</style>
+</head>
+<body>
+
+<header>
+  <span class="badge badge-ok" id="state-badge">…</span>
+  <h1>Admin</h1>
+  <span class="meta" id="version"></span>
+  <span class="meta" id="uptime"></span>
+  <a href="/">&larr; Dashboard</a>
+</header>
+
+<div id="admin-notice" hidden></div>
+
+<div class="section-title">Controls</div>
+<div class="controls">
+  <button id="btn-drain">Drain</button>
+  <button id="btn-resume">Resume</button>
+  <button id="btn-restart">Restart</button>
+</div>
+<div id="action-line"></div>
+
+<div class="section-title" style="margin-top:24px">State</div>
+<div class="stats">
+  <div class="stat"><div class="stat-label">State</div><div class="stat-value" id="s-state">—</div></div>
+  <div class="stat"><div class="stat-label">In-Flight</div><div class="stat-value" id="s-inflight">—</div><div class="stat-sub" id="s-inflight-sub"></div></div>
+  <div class="stat"><div class="stat-label">Queue Depth</div><div class="stat-value" id="s-queue">—</div></div>
+  <div class="stat"><div class="stat-label">Deferred</div><div class="stat-value" id="s-defer">—</div></div>
+  <div class="stat"><div class="stat-label">Loaded Model</div><div class="stat-value" id="s-model">—</div><div class="stat-sub" id="s-model-sub"></div></div>
+  <div class="stat"><div class="stat-label">VRAM</div><div class="stat-value" id="s-vram">—</div><div class="stat-sub" id="s-vram-sub"></div></div>
+</div>
+
+<script>
+  const $ = id => document.getElementById(id);
+
+  let restarting = false;
+  let controlsDisabled = false;
+
+  function fmtUptime(since) {
+    if (!since) return '';
+    const s = Math.floor((Date.now() - new Date(since)) / 1000);
+    if (s < 60) return `up ${s}s`;
+    if (s < 3600) return `up ${Math.floor(s/60)}m`;
+    return `up ${Math.floor(s/3600)}h ${Math.floor((s%3600)/60)}m`;
+  }
+
+  function setBadge(state) {
+    const b = $('state-badge');
+    b.textContent = state;
+    b.className = 'badge badge-' + (state === 'draining' ? 'draining' : state === 'restarting' ? 'restarting' : 'ok');
+  }
+
+  function setControls(state) {
+    if (controlsDisabled || restarting) {
+      $('btn-drain').disabled = $('btn-resume').disabled = $('btn-restart').disabled = true;
+      return;
+    }
+    const draining = state === 'draining';
+    $('btn-drain').disabled = draining;
+    $('btn-resume').disabled = !draining;
+    $('btn-restart').disabled = false;
+  }
+
+  function showNotice(text) {
+    $('admin-notice').textContent = text;
+    $('admin-notice').hidden = false;
+  }
+
+  function lanDisable() {
+    controlsDisabled = true;
+    setControls('ok');
+    showNotice('Admin controls only work when this page is opened on the server itself (http://localhost:PORT/admin). This device is on the LAN — every control returns 404.');
+  }
+
+  async function callAdmin(path) {
+    $('action-line').textContent = '…';
+    try {
+      const r = await fetch(path, { method: 'POST' });
+      if (r.status === 404) { lanDisable(); $('action-line').textContent = ''; return null; }
+      if (r.status === 501) { $('action-line').textContent = 'Restart is not available in this build.'; return null; }
+      const d = await r.json();
+      setBadge(d.state);
+      setControls(d.state);
+      $('action-line').textContent = '';
+      return d;
+    } catch (e) {
+      $('action-line').textContent = 'request failed, retrying…';
+      return null;
+    }
+  }
+
+  $('btn-drain').onclick  = () => callAdmin('/v1/admin/drain');
+  $('btn-resume').onclick = () => callAdmin('/v1/admin/resume');
+  $('btn-restart').onclick = async () => {
+    if (!confirm('Restart the server? In-flight requests finish, then the process exits and the run.cmd loop relaunches it.')) return;
+    const d = await callAdmin('/v1/admin/restart');
+    if (!d) return;
+    restarting = true;
+    setBadge('restarting');
+    setControls('restarting');
+    awaitRestart();
+  };
+
+  async function awaitRestart() {
+    const deadline = Date.now() + 30000;
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 1000));
+      try {
+        const r = await fetch('/healthz');
+        if (r.ok) {
+          const h = await r.json();
+          $('action-line').textContent = `back up (v${h.version})`;
+          restarting = false;
+          setBadge(h.state || 'ok');
+          setControls(h.state || 'ok');
+          return;
+        }
+      } catch (e) { /* still down */ }
+    }
+    restarting = false;
+    $('action-line').textContent = 'server exited and has not come back — if you are not using the run.cmd relaunch loop (e.g. a bare "go run"), start it again manually.';
+  }
+
+  async function poll() {
+    if (restarting) return true;
+    try {
+      const r = await fetch('/v1/status');
+      if (!r.ok) throw new Error(r.status);
+      const d = await r.json();
+
+      $('version').textContent = d.version || '';
+      $('uptime').textContent = fmtUptime(d.uptime_since);
+      const state = d.state || 'ok';
+      setBadge(state);
+      setControls(state);
+
+      $('s-state').textContent = state;
+      $('s-inflight').textContent = d.in_flight ?? '—';
+      $('s-inflight-sub').textContent = d.max_parallel ? `of ${d.max_parallel} max` : '';
+      $('s-queue').textContent = d.queue_depth ?? '—';
+      $('s-defer').textContent = d.defer_queue_depth ?? 0;
+
+      if (d.loaded_model) {
+        const desc = d.loaded_model.descriptor;
+        $('s-model').textContent = desc.tier_label || desc.name || '—';
+        $('s-model-sub').textContent = desc.name || '';
+      } else {
+        $('s-model').textContent = 'idle';
+        $('s-model-sub').textContent = '';
+      }
+
+      if (d.available_vram_mb != null && d.available_vram_mb >= 0) {
+        $('s-vram').textContent = d.available_vram_mb + ' MB free';
+        const self = d.self_vram_mb || 0, other = d.other_vram_mb || 0;
+        $('s-vram-sub').textContent = [self > 0 ? `server ${self} MB` : '', other > 0 ? `other ${other} MB` : ''].filter(Boolean).join(' · ');
+      } else {
+        $('s-vram').textContent = 'N/A';
+        $('s-vram-sub').textContent = '';
+      }
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  let pollInterval = 2000;
+  async function scheduledPoll() {
+    const ok = await poll();
+    pollInterval = ok ? 2000 : Math.min(pollInterval * 2, 30000);
+    setTimeout(scheduledPoll, pollInterval);
+  }
+
+  // On load: one probe of GET /v1/admin so a LAN visitor sees the explanation
+  // without having to click a button.
+  (async () => {
+    try {
+      const r = await fetch('/v1/admin');
+      if (r.status === 404) lanDisable();
+    } catch (e) { /* ignore — poll() covers connectivity */ }
+    scheduledPoll();
+  })();
+</script>
+</body>
+</html>

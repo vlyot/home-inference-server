@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Logs — Home Inference Server</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: ui-monospace, "SF Mono", Consolas, monospace;
+    font-size: 13px;
+    background: #0d0d0f;
+    color: #d4d4d8;
+    min-height: 100vh;
+    padding: 24px;
+  }
+
+  header {
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+    margin-bottom: 20px;
+    border-bottom: 1px solid #27272a;
+    padding-bottom: 16px;
+  }
+
+  header h1 { font-size: 16px; font-weight: 600; color: #f4f4f5; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; display: inline-block; margin-right: 6px; }
+  .dot.stale { background: #ef4444; }
+  .navlink { font-size: 11px; color: #71717a; text-decoration: none; }
+  .navlink:hover { color: #d4d4d8; }
+  #status-indicator { margin-left: auto; font-size: 11px; color: #71717a; }
+
+  .controls {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+  }
+
+  .control label {
+    font-size: 11px;
+    color: #71717a;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-right: 6px;
+  }
+
+  select {
+    font-family: inherit;
+    font-size: 12px;
+    background: #18181b;
+    color: #d4d4d8;
+    border: 1px solid #27272a;
+    border-radius: 4px;
+    padding: 4px 8px;
+  }
+
+  .table-wrap { overflow-x: auto; }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    background: #18181b;
+    border: 1px solid #27272a;
+    border-radius: 6px;
+    overflow: hidden;
+    min-width: 900px;
+  }
+
+  th {
+    text-align: left;
+    padding: 8px 12px;
+    font-size: 11px;
+    color: #71717a;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    border-bottom: 1px solid #27272a;
+    background: #121214;
+    white-space: nowrap;
+  }
+
+  td {
+    padding: 7px 12px;
+    border-bottom: 1px solid #1f1f22;
+    color: #d4d4d8;
+    vertical-align: top;
+  }
+
+  tr:last-child td { border-bottom: none; }
+
+  td.time, td.level { white-space: nowrap; }
+  td.msg { color: #f4f4f5; }
+  td.details {
+    color: #71717a;
+    font-size: 11px;
+    max-width: 380px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .badge {
+    display: inline-block;
+    padding: 2px 7px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 500;
+  }
+
+  .badge-error   { background: #450a0a; color: #fca5a5; }
+  .badge-warn    { background: #422006; color: #fdba74; }
+  .badge-info    { background: #27272a; color: #a1a1aa; }
+  .badge-debug   { background: #1a1a1e; color: #71717a; }
+  .badge-event   { background: #172554; color: #93c5fd; }
+
+  .empty { padding: 32px 12px; text-align: center; color: #52525b; }
+</style>
+</head>
+<body>
+
+<header>
+  <span class="dot" id="dot"></span>
+  <h1>Logs</h1>
+  <a class="navlink" href="/">← Dashboard</a>
+  <a class="navlink" href="/chat">Chat →</a>
+  <a class="navlink" href="/docs">API Docs →</a>
+  <span id="status-indicator">connecting…</span>
+</header>
+
+<div class="controls">
+  <div class="control">
+    <label for="f-level">Level</label>
+    <select id="f-level">
+      <option value="">all</option>
+      <option value="ERROR">ERROR</option>
+      <option value="WARN">WARN</option>
+      <option value="INFO">INFO</option>
+      <option value="DEBUG">DEBUG</option>
+    </select>
+  </div>
+  <div class="control">
+    <label for="f-event">Event</label>
+    <select id="f-event"><option value="">all</option></select>
+  </div>
+  <div class="control">
+    <label for="f-since">Window</label>
+    <select id="f-since">
+      <option value="1h">1h</option>
+      <option value="12h">12h</option>
+      <option value="24h" selected>24h</option>
+    </select>
+  </div>
+</div>
+
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>Time</th>
+      <th>Level</th>
+      <th>Event</th>
+      <th>Message</th>
+      <th>Details</th>
+    </tr>
+  </thead>
+  <tbody id="logs-body">
+    <tr><td class="empty" colspan="5">No logs</td></tr>
+  </tbody>
+</table>
+</div>
+
+<script>
+  const $ = id => document.getElementById(id);
+
+  // logschema event kinds — keep in sync with logschema/events.go
+  const EVENT_KINDS = [
+    'job.received', 'job.queued', 'job.dispatched', 'job.inferring',
+    'job.done', 'job.failed', 'job.deferred',
+    'model.loading', 'model.loaded', 'model.evicting', 'model.evicted', 'model.oom', 'model.fallback',
+    'vram.check', 'vram.pressure',
+    'queue.poll', 'queue.claimed', 'queue.acked', 'queue.returned',
+    'server.start', 'server.stop',
+    'contention.detected', 'quality.degraded', 'speed.floor',
+    'relay.rate_limited', 'relay.quota_exceeded', 'relay.result_served', 'relay.results_purged',
+  ];
+
+  for (const k of EVENT_KINDS) {
+    const o = document.createElement('option');
+    o.value = o.textContent = k;
+    $('f-event').appendChild(o);
+  }
+
+  function fmtTime(ts) {
+    const d = new Date(ts);
+    const now = new Date();
+    const t = d.toLocaleTimeString('en-GB', { hour12: false });
+    if (d.toDateString() === now.toDateString()) return t;
+    return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }) + ' ' + t;
+  }
+
+  function levelBadge(level) {
+    const cls = { ERROR: 'error', WARN: 'warn', INFO: 'info', DEBUG: 'debug' }[level] || 'info';
+    return `<span class="badge badge-${cls}">${level}</span>`;
+  }
+
+  function fmtDetails(attrs) {
+    if (!attrs) return '';
+    return Object.entries(attrs).map(([k, v]) => `${k}=${v}`).join('  ');
+  }
+
+  function render(logs) {
+    const tbody = $('logs-body');
+    if (!logs || logs.length === 0) {
+      tbody.innerHTML = '<tr><td class="empty" colspan="5">No logs</td></tr>';
+      return;
+    }
+    tbody.innerHTML = logs.map(l => {
+      const details = fmtDetails(l.attrs);
+      const evt = l.event ? `<span class="badge badge-event">${l.event}</span>` : '—';
+      return `
+      <tr>
+        <td class="time">${fmtTime(l.time)}</td>
+        <td class="level">${levelBadge(l.level)}</td>
+        <td>${evt}</td>
+        <td class="msg">${escapeHtml(l.msg)}</td>
+        <td class="details" title="${escapeHtml(details)}">${escapeHtml(details)}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  function escapeHtml(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function query() {
+    const p = new URLSearchParams();
+    const level = $('f-level').value;
+    const event = $('f-event').value;
+    if (level) p.set('level', level);
+    if (event) p.set('event', event);
+    p.set('since', $('f-since').value);
+    p.set('limit', '1000');
+    return p.toString();
+  }
+
+  async function poll() {
+    try {
+      const r = await fetch('/v1/logs?' + query());
+      if (r.status === 501) {
+        $('logs-body').innerHTML = '<tr><td class="empty" colspan="5">Log buffer not enabled</td></tr>';
+        $('dot').className = 'dot';
+        $('status-indicator').textContent = 'disabled';
+        return true;
+      }
+      if (!r.ok) throw new Error(r.status);
+      const d = await r.json();
+      $('dot').className = 'dot';
+      $('status-indicator').textContent = 'live';
+      render(d.logs);
+      return true;
+    } catch (e) {
+      $('dot').className = 'dot stale';
+      $('status-indicator').textContent = 'unreachable';
+      return false;
+    }
+  }
+
+  let pollInterval = 2000;
+  const pollMin = 2000;
+  const pollMax = 30000;
+
+  async function scheduledPoll() {
+    const ok = await poll();
+    pollInterval = ok ? pollMin : Math.min(pollInterval * 2, pollMax);
+    setTimeout(scheduledPoll, pollInterval);
+  }
+
+  for (const id of ['f-level', 'f-event', 'f-since']) {
+    $(id).addEventListener('change', poll);
+  }
+
+  scheduledPoll();
+</script>
+</body>
+</html>

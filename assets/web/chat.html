@@ -1,0 +1,631 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chat — Home Inference Server</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body { height: 100%; }
+
+  body {
+    font-family: ui-monospace, "SF Mono", Consolas, monospace;
+    font-size: 13px;
+    background: #0d0d0f;
+    color: #d4d4d8;
+    display: flex;
+    flex-direction: column;
+    padding: 24px;
+    gap: 16px;
+  }
+
+  header {
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+    border-bottom: 1px solid #27272a;
+    padding-bottom: 16px;
+    flex-shrink: 0;
+  }
+
+  header h1 { font-size: 16px; font-weight: 600; color: #f4f4f5; }
+  .meta { color: #71717a; font-size: 12px; }
+  .navlink { font-size: 11px; color: #71717a; text-decoration: none; }
+  .navlink:hover { color: #d4d4d8; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; display: inline-block; margin-right: 6px; }
+  .dot.stale { background: #ef4444; }
+  #tier-info { margin-left: auto; font-size: 11px; color: #71717a; }
+  #save-state { font-size: 11px; color: #a16207; }
+
+  .layout {
+    display: flex;
+    gap: 16px;
+    flex: 1;
+    min-height: 0;
+  }
+
+  aside {
+    width: 220px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    overflow-y: auto;
+  }
+
+  .new-chat {
+    background: #18181b;
+    border: 1px solid #27272a;
+    border-radius: 6px;
+    color: #f4f4f5;
+    padding: 8px 12px;
+    font: inherit;
+    cursor: pointer;
+    text-align: left;
+  }
+  .new-chat:hover { border-color: #3f3f46; }
+
+  .chat-item {
+    background: #18181b;
+    border: 1px solid #27272a;
+    border-radius: 6px;
+    padding: 8px 12px;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .chat-item:hover { border-color: #3f3f46; }
+  .chat-item.active { border-color: #2563eb; background: #12203c; }
+  .chat-item .title { color: #d4d4d8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chat-item .when { color: #71717a; font-size: 11px; }
+  .chat-empty { color: #52525b; padding: 8px 12px; font-size: 12px; }
+
+  .conversation {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    background: #121214;
+    border: 1px solid #27272a;
+    border-radius: 6px;
+    overflow: hidden;
+  }
+
+  #thread {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .msg { display: flex; }
+  .msg-user { justify-content: flex-end; }
+  .msg-assistant, .msg-error { justify-content: flex-start; }
+
+  .bubble {
+    max-width: 72ch;
+    padding: 10px 14px;
+    border-radius: 8px;
+    word-break: break-word;
+    line-height: 1.5;
+  }
+  /* Plain-text bubbles (user turns, errors) rely on whitespace for line
+     breaks. Rendered-markdown bubbles (.md) get real block elements instead —
+     pre-wrap there would double up spacing around them. */
+  .bubble:not(.md) { white-space: pre-wrap; }
+  .msg-user .bubble { background: #172554; color: #bfdbfe; }
+  .msg-assistant .bubble { background: #18181b; border: 1px solid #27272a; color: #d4d4d8; }
+  .msg-error .bubble { background: #450a0a; color: #fca5a5; }
+
+  /* Markdown typography for rendered assistant replies. */
+  .bubble.md > *:first-child { margin-top: 0; }
+  .bubble.md > *:last-child { margin-bottom: 0; }
+  .bubble.md p { margin: 0.6em 0; }
+  .bubble.md h1, .bubble.md h2, .bubble.md h3, .bubble.md h4 {
+    margin: 1em 0 0.4em;
+    line-height: 1.3;
+    color: #f4f4f5;
+  }
+  .bubble.md h1 { font-size: 1.25em; }
+  .bubble.md h2 { font-size: 1.15em; }
+  .bubble.md h3, .bubble.md h4 { font-size: 1.05em; }
+  .bubble.md ul, .bubble.md ol { margin: 0.5em 0; padding-left: 1.4em; }
+  .bubble.md li { margin: 0.2em 0; }
+  .bubble.md li > p { margin: 0.2em 0; }
+  .bubble.md a { color: #93c5fd; }
+  .bubble.md strong { color: #f4f4f5; font-weight: 600; }
+  .bubble.md hr { border: none; border-top: 1px solid #27272a; margin: 1em 0; }
+  .bubble.md blockquote {
+    margin: 0.6em 0;
+    padding: 2px 12px;
+    border-left: 2px solid #3f3f46;
+    color: #a1a1aa;
+  }
+  .bubble.md code {
+    font-family: ui-monospace, "SF Mono", Consolas, monospace;
+    font-size: 0.9em;
+    background: #27272a;
+    padding: 1px 5px;
+    border-radius: 4px;
+  }
+  .bubble.md pre {
+    margin: 0.6em 0;
+    padding: 10px 12px;
+    background: #0d0d0f;
+    border: 1px solid #27272a;
+    border-radius: 6px;
+    overflow-x: auto;
+  }
+  .bubble.md pre code { background: none; padding: 0; border-radius: 0; }
+  .bubble.md table {
+    margin: 0.6em 0;
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 0.95em;
+  }
+  .bubble.md th, .bubble.md td {
+    border: 1px solid #27272a;
+    padding: 5px 10px;
+    text-align: left;
+  }
+  .bubble.md th { background: #121214; color: #f4f4f5; }
+
+  .thinking {
+    max-width: 72ch;
+    margin-bottom: 6px;
+    font-size: 12px;
+    color: #a1a1aa;
+  }
+  .thinking summary {
+    cursor: pointer;
+    color: #71717a;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .thinking summary::before { content: "💡"; font-size: 11px; }
+  .thinking summary::-webkit-details-marker { display: none; }
+  .thinking[open] summary { color: #a1a1aa; }
+  .thinking-body {
+    margin-top: 6px;
+    padding: 8px 12px;
+    border-left: 2px solid #27272a;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: #71717a;
+  }
+
+  .typing .bubble::after {
+    content: "···";
+    letter-spacing: 2px;
+    animation: blink 1.2s steps(3, end) infinite;
+  }
+  @keyframes blink { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }
+
+  .thread-empty {
+    margin: auto;
+    color: #52525b;
+    text-align: center;
+  }
+
+  #ctx-warn {
+    background: #1c1409;
+    border-top: 1px solid #78350f;
+    color: #fdba74;
+    padding: 8px 16px;
+    font-size: 12px;
+  }
+
+  #composer {
+    display: flex;
+    gap: 8px;
+    padding: 12px;
+    border-top: 1px solid #27272a;
+    align-items: flex-end;
+  }
+
+  #input {
+    flex: 1;
+    resize: none;
+    background: #0d0d0f;
+    border: 1px solid #27272a;
+    border-radius: 6px;
+    color: #d4d4d8;
+    font: inherit;
+    padding: 8px 10px;
+    max-height: 140px;
+    line-height: 1.5;
+    overflow-y: auto;
+    scrollbar-width: none;       /* Firefox */
+    -ms-overflow-style: none;    /* old Edge/IE */
+  }
+  #input::-webkit-scrollbar { display: none; } /* Chrome/Edge/Safari */
+  #input:focus { outline: none; border-color: #3f3f46; }
+
+  select, #composer button {
+    background: #18181b;
+    border: 1px solid #27272a;
+    border-radius: 6px;
+    color: #d4d4d8;
+    font: inherit;
+    padding: 8px 12px;
+    cursor: pointer;
+  }
+  #composer button:hover, select:hover { border-color: #3f3f46; }
+  #send { color: #f4f4f5; }
+  #send:disabled { opacity: 0.4; cursor: not-allowed; }
+  #delete-chat { color: #fca5a5; }
+</style>
+<script src="/vendor/marked.min.js"></script>
+<script src="/vendor/dompurify.min.js"></script>
+</head>
+<body>
+
+<header>
+  <span class="dot" id="dot"></span>
+  <h1>Chat</h1>
+  <a class="navlink" href="/">← Dashboard</a>
+  <a class="navlink" href="/logs">Logs →</a>
+  <a class="navlink" href="/docs">API Docs →</a>
+  <span id="save-state" hidden>not saved</span>
+  <span id="tier-info">—</span>
+</header>
+
+<div class="layout">
+  <aside>
+    <button class="new-chat" id="new-chat">+ New Chat</button>
+    <div id="chat-list"></div>
+  </aside>
+
+  <div class="conversation">
+    <div id="thread"><div class="thread-empty">Start a conversation below.</div></div>
+    <div id="ctx-warn" hidden>This chat is getting long. The model will soon start to lose track of the earlier messages — start a New Chat when you can.</div>
+    <form id="composer">
+      <textarea id="input" rows="1" placeholder="Message the model…  (Enter to send, Shift+Enter for newline)"></textarea>
+      <select id="tier" title="Model tier — forces which model answers, overriding automatic VRAM-based selection">
+        <option value="">auto</option>
+        <option value="weak">weak (qwen2.5-3b — smallest, lowest VRAM)</option>
+        <option value="mid">mid (gemma-4-e2b)</option>
+        <option value="strong">strong (gemma-4-e4b — largest, best quality)</option>
+      </select>
+      <button type="submit" id="send">Send</button>
+      <button type="button" id="delete-chat">Delete chat</button>
+    </form>
+  </div>
+</div>
+
+<script>
+  const $ = id => document.getElementById(id);
+
+  let convId = null;
+  let messages = [];
+  let streaming = false;
+  let nCtx = 4096;
+
+  function relTime(iso) {
+    const s = Math.floor((Date.now() - new Date(iso)) / 1000);
+    if (s < 60) return `${s}s ago`;
+    if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+    if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+    return `${Math.floor(s / 86400)}d ago`;
+  }
+
+  function clearThread() {
+    $('thread').innerHTML = '<div class="thread-empty">Start a conversation below.</div>';
+  }
+
+  // renderMarkdown converts assistant-generated markdown to sanitized HTML.
+  // marked.parse produces HTML from the model's raw text; DOMPurify strips
+  // anything unsafe (script tags, event-handler attributes, javascript: URLs)
+  // before it ever touches the DOM — required because this text originates
+  // from the model, not a trusted source, and a crafted prompt could induce
+  // HTML/script-like output.
+  function renderMarkdown(text) {
+    const html = marked.parse(text, { breaks: true });
+    return DOMPurify.sanitize(html);
+  }
+
+  function appendMessage(role, content) {
+    const empty = $('thread').querySelector('.thread-empty');
+    if (empty) empty.remove();
+    const wrap = document.createElement('div');
+    wrap.className = `msg msg-${role}`;
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    if (role === 'assistant') {
+      bubble.classList.add('md');
+      bubble.innerHTML = renderMarkdown(content);
+    } else {
+      bubble.textContent = content;
+    }
+    wrap.appendChild(bubble);
+    $('thread').appendChild(wrap);
+    $('thread').scrollTop = $('thread').scrollHeight;
+    return bubble;
+  }
+
+  function showTyping() {
+    const empty = $('thread').querySelector('.thread-empty');
+    if (empty) empty.remove();
+    const wrap = document.createElement('div');
+    wrap.className = 'msg msg-assistant typing';
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    wrap.appendChild(bubble);
+    $('thread').appendChild(wrap);
+    $('thread').scrollTop = $('thread').scrollHeight;
+    return wrap;
+  }
+
+  function rebuildThread() {
+    $('thread').innerHTML = '';
+    if (messages.length === 0) { clearThread(); return; }
+    for (const m of messages) {
+      appendMessage(m.role === 'assistant' ? 'assistant' : m.role === 'user' ? 'user' : 'assistant', m.content);
+    }
+  }
+
+  async function updateCtxWarn() {
+    if (messages.length === 0) { $('ctx-warn').hidden = true; return; }
+    try {
+      const transcript = messages.map(m => m.role + ': ' + m.content).join('\n');
+      const r = await fetch('/v1/tokenize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: transcript }),
+      });
+      if (!r.ok) return;
+      const d = await r.json();
+      if (d.n_ctx) nCtx = d.n_ctx;
+      const used = d.tokens + 8 * messages.length;
+      const usable = nCtx - 512;
+      $('ctx-warn').hidden = !(used >= usable * 0.85);
+    } catch (e) { /* leave banner as-is */ }
+  }
+
+  async function streamAssistant(preferredTier) {
+    const typing = showTyping();
+    let bubble = null;
+    let thinkingBody = null;
+    let acc = '';
+    let reasoningAcc = '';
+    let buf = '';
+    let sawError = false;
+
+    // Lazily inserts (once) the collapsible "Thinking…" block right before
+    // the typing/answer bubble, open while streaming so reasoning is visible
+    // as it arrives, matching llama-server's own chat UI.
+    function ensureThinkingBlock() {
+      if (thinkingBody) return;
+      const empty = $('thread').querySelector('.thread-empty');
+      if (empty) empty.remove();
+      const details = document.createElement('details');
+      details.className = 'thinking';
+      details.open = true;
+      const summary = document.createElement('summary');
+      summary.textContent = 'Thinking…';
+      thinkingBody = document.createElement('div');
+      thinkingBody.className = 'thinking-body';
+      details.appendChild(summary);
+      details.appendChild(thinkingBody);
+      $('thread').insertBefore(details, typing);
+      $('thread').scrollTop = $('thread').scrollHeight;
+    }
+
+    try {
+      const res = await fetch('/v1/infer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          modality: 'text',
+          text_input: { messages },
+          stream: true,
+          preferred_tier: preferredTier || undefined,
+        }),
+      });
+      if (!res.ok || !res.body) throw new Error('HTTP ' + res.status);
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split('\n');
+        buf = lines.pop();
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const payload = line.slice(6);
+          if (payload === '[DONE]') continue;
+          let chunk;
+          try { chunk = JSON.parse(payload); } catch (e) { continue; }
+          if (chunk.error) { sawError = true; throw new Error(errorText(chunk.error)); }
+          if (chunk.reasoning) {
+            ensureThinkingBlock();
+            reasoningAcc += chunk.reasoning;
+            thinkingBody.textContent = reasoningAcc;
+            $('thread').scrollTop = $('thread').scrollHeight;
+          }
+          if (chunk.delta) {
+            if (!bubble) {
+              typing.remove();
+              bubble = appendMessage('assistant', '');
+              if (thinkingBody) thinkingBody.closest('.thinking').open = false;
+            }
+            acc += chunk.delta;
+            bubble.innerHTML = renderMarkdown(acc);
+            $('thread').scrollTop = $('thread').scrollHeight;
+          }
+        }
+      }
+
+      if (acc === '' && !sawError) {
+        if (bubble) bubble.parentElement.remove(); else typing.remove();
+        if (thinkingBody) thinkingBody.closest('.thinking').remove();
+        throw new Error(errorText(reasoningAcc ? 'reasoning_exhausted' : 'internal_error'));
+      }
+      messages.push({ role: 'assistant', content: acc });
+    } catch (e) {
+      typing.remove();
+      if (thinkingBody) thinkingBody.closest('.thinking').remove();
+      appendMessage('error', 'Request failed: ' + e.message);
+      throw e;
+    }
+  }
+
+  async function sendMessage() {
+    const text = $('input').value.trim();
+    if (!text || streaming) return;
+    streaming = true;
+    $('send').disabled = true;
+
+    messages.push({ role: 'user', content: text });
+    appendMessage('user', text);
+    $('input').value = '';
+    autoGrow();
+
+    try {
+      await streamAssistant($('tier').value);
+      await persist();
+    } catch (e) {
+      // Error bubble already shown. Drop the unanswered user turn and restore it
+      // to the input so the send can be retried without doubling the history.
+      messages.pop();
+      $('input').value = text;
+      autoGrow();
+    } finally {
+      streaming = false;
+      $('send').disabled = false;
+      refreshStatus();
+      refreshList();
+      updateCtxWarn();
+      $('input').focus();
+    }
+  }
+
+  async function persist() {
+    if (messages.length === 0) return;
+    if (!convId) convId = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now())).replace(/-/g, '');
+    try {
+      const r = await fetch('/v1/chats/' + convId, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages }),
+      });
+      $('save-state').hidden = r.ok;
+    } catch (e) {
+      $('save-state').hidden = false;
+    }
+  }
+
+  async function loadConversation(id) {
+    try {
+      const r = await fetch('/v1/chats/' + id);
+      if (!r.ok) return;
+      const c = await r.json();
+      convId = c.id;
+      messages = (c.messages || []).map(m => ({ role: m.role, content: m.content }));
+      rebuildThread();
+      await updateCtxWarn();
+      refreshList();
+    } catch (e) { /* ignore */ }
+  }
+
+  function newConversation() {
+    convId = null;
+    messages = [];
+    clearThread();
+    $('ctx-warn').hidden = true;
+    $('save-state').hidden = true;
+    refreshList();
+    $('input').focus();
+  }
+
+  async function deleteConversation() {
+    if (convId) {
+      try { await fetch('/v1/chats/' + convId, { method: 'DELETE' }); } catch (e) { /* ignore */ }
+    }
+    newConversation();
+  }
+
+  async function refreshList() {
+    try {
+      const r = await fetch('/v1/chats');
+      if (!r.ok) return;
+      const list = await r.json();
+      const el = $('chat-list');
+      if (!list || list.length === 0) {
+        el.innerHTML = '<div class="chat-empty">No saved chats</div>';
+        return;
+      }
+      el.innerHTML = list.map(c => `
+        <div class="chat-item${c.id === convId ? ' active' : ''}" data-id="${c.id}">
+          <span class="title">${escapeHtml(c.title || 'untitled')}</span>
+          <span class="when">${relTime(c.updated_at)}</span>
+        </div>
+      `).join('');
+      el.querySelectorAll('.chat-item').forEach(node => {
+        node.addEventListener('click', () => loadConversation(node.dataset.id));
+      });
+    } catch (e) { /* ignore */ }
+  }
+
+  function escapeHtml(s) {
+    return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  function errorText(code) {
+    if (code === 'overloaded') return 'the server is under heavy load right now — try again shortly, or pick a smaller model tier';
+    if (code === 'timeout') return 'the request timed out';
+    if (code === 'model_load_failed' || code === 'unavailable') return 'the model backend is unavailable';
+    if (code === 'internal_error') return 'the model produced no output — it may still be loading, try again in a moment';
+    if (code === 'reasoning_exhausted') return 'the model spent its whole reply budget thinking and never answered — try again, or ask something more specific';
+    return code;
+  }
+
+  async function refreshStatus() {
+    try {
+      const r = await fetch('/v1/status');
+      if (!r.ok) throw new Error(r.status);
+      const d = await r.json();
+      $('dot').className = 'dot';
+      const desc = d.loaded_model && d.loaded_model.descriptor;
+      const label = desc
+        ? (desc.name && desc.tier_label ? `${desc.name} (${desc.tier_label})` : desc.tier_label || desc.name)
+        : 'idle';
+      const tps = d.tokens_per_sec && d.tokens_per_sec > 0 ? d.tokens_per_sec.toFixed(1) + ' tok/s' : '—';
+      $('tier-info').textContent = `${label} · ${tps}`;
+    } catch (e) {
+      $('dot').className = 'dot stale';
+    }
+  }
+
+  function autoGrow() {
+    const el = $('input');
+    el.style.height = 'auto';
+    el.style.height = Math.min(el.scrollHeight, 140) + 'px';
+  }
+
+  $('composer').addEventListener('submit', e => { e.preventDefault(); sendMessage(); });
+  $('input').addEventListener('input', autoGrow);
+  $('input').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+  });
+  $('new-chat').addEventListener('click', newConversation);
+  $('delete-chat').addEventListener('click', deleteConversation);
+
+  // n_ctx is picked up from the first /v1/tokenize call (updateCtxWarn) — no
+  // need to hit /v1/model/props on load, which used to force a cold model spawn.
+  refreshList();
+  refreshStatus();
+  setInterval(refreshStatus, 5000);
+  $('input').focus();
+</script>
+</body>
+</html>
