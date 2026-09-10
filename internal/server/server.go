@@ -304,8 +304,12 @@ func (s *Server) handleInfer(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, api.ErrCodeInvalidRequest, "vision_input.prompt is required", req.CorrelationID)
 			return
 		}
-		if req.VisionInput.ImageBase64 == "" && req.VisionInput.ImageURL == "" {
-			writeError(w, http.StatusBadRequest, api.ErrCodeInvalidRequest, "vision_input needs image_base64 or image_url", req.CorrelationID)
+		if req.VisionInput.ImageBase64 == "" {
+			if req.VisionInput.ImageURL != "" {
+				writeError(w, http.StatusBadRequest, api.ErrCodeInvalidRequest, "image_url is not supported; send the image as image_base64", req.CorrelationID)
+				return
+			}
+			writeError(w, http.StatusBadRequest, api.ErrCodeInvalidRequest, "vision_input needs image_base64", req.CorrelationID)
 			return
 		}
 	case "":
@@ -477,7 +481,7 @@ func writeError(w http.ResponseWriter, status int, code, message, correlationID 
 
 func backendErrToHTTPStatus(code string) int {
 	switch code {
-	case api.ErrCodeInvalidRequest, api.ErrCodeInvalidModality:
+	case api.ErrCodeInvalidRequest, api.ErrCodeInvalidModality, api.ErrCodeInvalidGrammar:
 		return http.StatusBadRequest
 	case api.ErrCodeUnauthorized:
 		return http.StatusUnauthorized
@@ -530,18 +534,19 @@ func TranslateInferRequest(req api.InferRequest, requestID string) backend.Reque
 	}
 
 	return backend.Request{
-		CorrelationID: req.CorrelationID,
-		RequestID:     requestID,
-		Modality:      backend.ModalityKind(req.Modality),
-		Prompt:        prompt,
-		Messages:      messages,
-		ImageData:     imageData,
-		MaxTokens:     req.MaxTokens,
-		Temperature:   req.Temperature,
-		Priority:      req.Priority,
-		MinTier:       req.MinTier,
-		PreferredTier: req.PreferredTier,
-		Stream:        req.Stream,
+		CorrelationID:  req.CorrelationID,
+		RequestID:      requestID,
+		Modality:       backend.ModalityKind(req.Modality),
+		Prompt:         prompt,
+		Messages:       messages,
+		ImageData:      imageData,
+		MaxTokens:      req.MaxTokens,
+		Temperature:    req.Temperature,
+		Priority:       req.Priority,
+		MinTier:        req.MinTier,
+		PreferredTier:  req.PreferredTier,
+		Stream:         req.Stream,
+		ResponseFormat: req.ResponseFormat,
 	}
 }
 

@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -14,6 +16,41 @@ import (
 )
 
 var httpClient = &http.Client{Timeout: 0} // no timeout — callers use ctx deadline
+
+// grammarErrorSignatures are substrings llama-server puts in a 400 body when it
+// cannot turn the request's response_format into a sampling grammar. Matched
+// case-insensitively.
+var grammarErrorSignatures = []string{
+	"json schema conversion failed",
+	"unable to generate parser",
+	"grammar",
+	"json_schema",
+	"response_format",
+}
+
+// chatErrorFromStatus turns a non-2xx chat/completions response into a
+// BackendError. A 400 whose body indicates the response_format schema could not
+// be compiled is surfaced as ErrCodeInvalidGrammar (the caller's schema is at
+// fault, HTTP 400); anything else stays model_load_failed (503). The body is
+// read once, capped, and closed by the caller's defer.
+func chatErrorFromStatus(resp *http.Response) *backend.BackendError {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode == http.StatusBadRequest {
+		low := strings.ToLower(string(body))
+		for _, sig := range grammarErrorSignatures {
+			if strings.Contains(low, sig) {
+				return &backend.BackendError{
+					Code:    "invalid_grammar",
+					Message: "response_format could not be compiled to a grammar: " + strings.TrimSpace(string(body)),
+				}
+			}
+		}
+	}
+	return &backend.BackendError{
+		Code:    "model_load_failed",
+		Message: fmt.Sprintf("llama-server returned HTTP %d", resp.StatusCode),
+	}
+}
 
 // defaultCompletionMaxTokens caps a single-shot /completion request (no chat
 // template, no reasoning) when the caller doesn't specify one.
@@ -202,9 +239,40 @@ func completeStream(ctx context.Context, baseURL string, req backend.Request, ch
 
 // ── chat-completions path (multi-turn) ─────────────────────────────────────────
 
+// chatMessage.Content is either a plain string (text turn) or a []contentPart
+// (a turn carrying an image, per the OpenAI multi-part content shape).
 type chatMessage struct {
 	Role    string `json:"role"`
-	Content string `json:"content"`
+	Content any    `json:"content"`
+}
+
+// contentPart is one element of a multi-part message: a text span or an image.
+type contentPart struct {
+	Type     string    `json:"type"` // "text" | "image_url"
+	Text     string    `json:"text,omitempty"`
+	ImageURL *imageURL `json:"image_url,omitempty"`
+}
+
+type imageURL struct {
+	URL string `json:"url"` // "data:<mime>;base64,<...>"
+}
+
+// sniffMIME picks an image MIME type from the leading magic bytes. Defaults to
+// image/jpeg for anything unrecognised — llama-server's image loader sniffs the
+// real format itself; the data-URI label is advisory.
+func sniffMIME(b []byte) string {
+	switch {
+	case len(b) >= 3 && b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF:
+		return "image/jpeg"
+	case len(b) >= 8 && string(b[:8]) == "\x89PNG\r\n\x1a\n":
+		return "image/png"
+	case len(b) >= 12 && string(b[:4]) == "RIFF" && string(b[8:12]) == "WEBP":
+		return "image/webp"
+	case len(b) >= 6 && (string(b[:6]) == "GIF87a" || string(b[:6]) == "GIF89a"):
+		return "image/gif"
+	default:
+		return "image/jpeg"
+	}
 }
 
 type chatReq struct {
@@ -213,6 +281,10 @@ type chatReq struct {
 	MaxTokens   int           `json:"max_tokens,omitempty"`
 	Temperature float32       `json:"temperature,omitempty"`
 	Stream      bool          `json:"stream"`
+	// ResponseFormat is forwarded verbatim from the caller. llama-server
+	// compiles a {"type":"json_schema",...} or {"type":"json_object"} value to
+	// a GBNF sampling grammar. Nil / omitted leaves generation unconstrained.
+	ResponseFormat json.RawMessage `json:"response_format,omitempty"`
 }
 
 type chatResp struct {
@@ -232,10 +304,34 @@ type chatResp struct {
 	} `json:"timings"`
 }
 
+// toChatMessages converts the backend message list into the wire shape. With no
+// image, every turn's Content is a plain string. With an image, the last user
+// turn's Content becomes a []contentPart: its text followed by an image_url
+// data-URI part — the shape llama-server's --mmproj path expects.
 func toChatMessages(req backend.Request) []chatMessage {
 	out := make([]chatMessage, len(req.Messages))
 	for i, m := range req.Messages {
 		out[i] = chatMessage{Role: m.Role, Content: m.Content}
+	}
+	if len(req.ImageData) == 0 {
+		return out
+	}
+	lastUser := -1
+	for i := len(out) - 1; i >= 0; i-- {
+		if out[i].Role == "user" {
+			lastUser = i
+			break
+		}
+	}
+	if lastUser < 0 {
+		return out
+	}
+	text, _ := out[lastUser].Content.(string)
+	dataURI := "data:" + sniffMIME(req.ImageData) + ";base64," +
+		base64.StdEncoding.EncodeToString(req.ImageData)
+	out[lastUser].Content = []contentPart{
+		{Type: "text", Text: text},
+		{Type: "image_url", ImageURL: &imageURL{URL: dataURI}},
 	}
 	return out
 }
@@ -243,11 +339,12 @@ func toChatMessages(req backend.Request) []chatMessage {
 // chatComplete sends a non-streaming /v1/chat/completions request.
 func chatComplete(ctx context.Context, baseURL string, req backend.Request) (backend.Response, error) {
 	body := chatReq{
-		Model:       "local",
-		Messages:    toChatMessages(req),
-		MaxTokens:   req.MaxTokens,
-		Temperature: req.Temperature,
-		Stream:      false,
+		Model:          "local",
+		Messages:       toChatMessages(req),
+		MaxTokens:      req.MaxTokens,
+		Temperature:    req.Temperature,
+		Stream:         false,
+		ResponseFormat: req.ResponseFormat,
 	}
 	if body.MaxTokens == 0 {
 		body.MaxTokens = defaultChatMaxTokens
@@ -274,10 +371,7 @@ func chatComplete(ctx context.Context, baseURL string, req backend.Request) (bac
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return backend.Response{}, &backend.BackendError{
-			Code:    "model_load_failed",
-			Message: fmt.Sprintf("llama-server returned HTTP %d", resp.StatusCode),
-		}
+		return backend.Response{}, chatErrorFromStatus(resp)
 	}
 
 	var cr chatResp
@@ -328,11 +422,12 @@ func chatCompleteStream(ctx context.Context, baseURL string, req backend.Request
 		StreamOptions map[string]bool `json:"stream_options"`
 	}{
 		chatReq: chatReq{
-			Model:       "local",
-			Messages:    toChatMessages(req),
-			MaxTokens:   req.MaxTokens,
-			Temperature: req.Temperature,
-			Stream:      true,
+			Model:          "local",
+			Messages:       toChatMessages(req),
+			MaxTokens:      req.MaxTokens,
+			Temperature:    req.Temperature,
+			Stream:         true,
+			ResponseFormat: req.ResponseFormat,
 		},
 		StreamOptions: map[string]bool{"include_usage": true},
 	}
@@ -362,10 +457,7 @@ func chatCompleteStream(ctx context.Context, baseURL string, req backend.Request
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return backend.Response{}, &backend.BackendError{
-			Code:    "model_load_failed",
-			Message: fmt.Sprintf("llama-server returned HTTP %d", resp.StatusCode),
-		}
+		return backend.Response{}, chatErrorFromStatus(resp)
 	}
 
 	scanner := bufio.NewScanner(resp.Body)
