@@ -24,6 +24,10 @@ const (
 	PathTokenize       = "/v1/tokenize"
 	PathModelProps     = "/v1/model/props"
 	PathLogs           = "/v1/logs"
+	// PathDescribe runs only the vision perception hop (SmolVLM2): image in,
+	// literal text description out. Used by the chat UI to fold an image into a
+	// text conversation without a full vision inference per follow-up.
+	PathDescribe = "/v1/describe"
 	// Admin control surface (loopback-only). PathAdmin alone is a GET state probe.
 	PathAdmin        = "/v1/admin"
 	PathAdminDrain   = "/v1/admin/drain"

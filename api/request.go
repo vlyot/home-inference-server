@@ -75,3 +75,10 @@ type VisionInput struct {
 	ImageURL    string `json:"image_url,omitempty"`
 	Prompt      string `json:"prompt"`
 }
+
+// DescribeRequest is the body for POST /v1/describe. The image is run through
+// the vision perception model only (no reasoning hop) and its literal
+// description is returned.
+type DescribeRequest struct {
+	ImageBase64 string `json:"image_base64"`
+}

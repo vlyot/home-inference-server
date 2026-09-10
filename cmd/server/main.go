@@ -246,15 +246,17 @@ func main() {
 	// models are never resident together. In stub mode a single fake backend
 	// stands in.
 	var visionBackend backend.Backend
+	var pipeVision *pipeline.Backend // typed handle for srv.SetDescriber; nil in stub mode
 	if flagBackend == "stub" {
 		visionBackend = stub.New(backend.ModalityKindVision, 0)
 	} else {
-		visionBackend = pipeline.New(visionInner, vramBackend, pipeline.Spec{
+		pipeVision = pipeline.New(visionInner, vramBackend, pipeline.Spec{
 			Modality:             backend.ModalityKindVision,
 			PerceptionPrompt:     pipeline.VisionPerceptionPrompt,
 			ReasonSystemPrompt:   pipeline.VisionReasonSystemPrompt,
 			DescriptionMaxTokens: 512,
 		})
+		visionBackend = pipeVision
 	}
 
 	backends := map[backend.ModalityKind]backend.Backend{
@@ -316,8 +318,10 @@ func main() {
 	srv.SetBackends(backends)
 	if flagBackend == "stub" {
 		srv.SetTokenizer(stubTokenizer{})
+		srv.SetDescriber(stubDescriber{})
 	} else {
 		srv.SetTokenizer(vramBackend)
+		srv.SetDescriber(pipeVision)
 	}
 	srv.SetLogSource(logBuf)
 	if inferTOMS := envInt("HIS_INFER_TIMEOUT_MS", 0); inferTOMS > 0 {
@@ -470,6 +474,14 @@ func (stubTokenizer) Tokenize(_ context.Context, text string) (int, error) {
 	return len(strings.Fields(text)), nil
 }
 func (stubTokenizer) NCtx(context.Context) (int, error) { return 4096, nil }
+
+// stubDescriber backs /v1/describe under --backend=stub so the conformance
+// suite can exercise the route with no vision model.
+type stubDescriber struct{}
+
+func (stubDescriber) Describe(_ context.Context, _ []byte) (string, string, error) {
+	return "a stub image description", "weak", nil
+}
 
 func envInt(key string, fallback int) int {
 	if v := os.Getenv(key); v != "" {

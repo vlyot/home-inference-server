@@ -223,10 +223,51 @@
 
   #composer {
     display: flex;
+    flex-wrap: wrap;
     gap: 8px;
     padding: 12px;
     border-top: 1px solid #27272a;
     align-items: flex-end;
+  }
+
+  /* Staged-image chip sits on its own row above the input (full width). */
+  #staged[hidden] { display: none; }
+  #staged {
+    flex-basis: 100%;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: #18181b;
+    border: 1px solid #27272a;
+    border-radius: 6px;
+    padding: 6px 8px;
+    font-size: 12px;
+    color: #a1a1aa;
+  }
+  #staged img { width: 40px; height: 40px; object-fit: cover; border-radius: 4px; }
+  #staged .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #staged button {
+    background: none;
+    border: none;
+    color: #71717a;
+    cursor: pointer;
+    font: inherit;
+    padding: 2px 6px;
+  }
+  #staged button:hover { color: #fca5a5; }
+
+  #attach { color: #a1a1aa; }
+  .bubble .thumb {
+    display: block;
+    max-width: 240px;
+    max-height: 240px;
+    border-radius: 6px;
+    margin-bottom: 6px;
+  }
+  .bubble .img-placeholder {
+    display: inline-block;
+    margin-right: 6px;
+    opacity: 0.7;
   }
 
   #input {
@@ -286,6 +327,13 @@
     <div id="thread"><div class="thread-empty">Start a conversation below.</div></div>
     <div id="ctx-warn" hidden>This chat is getting long. The model will soon start to lose track of the earlier messages — start a New Chat when you can.</div>
     <form id="composer">
+      <div id="staged" hidden>
+        <img id="staged-thumb" alt="">
+        <span class="name" id="staged-name"></span>
+        <button type="button" id="staged-clear" title="Remove image">✕</button>
+      </div>
+      <input type="file" id="file" accept="image/*" hidden>
+      <button type="button" id="attach" title="Attach an image">📎</button>
       <textarea id="input" rows="1" placeholder="Message the model…  (Enter to send, Shift+Enter for newline)"></textarea>
       <select id="tier" title="Model tier — forces which model answers, overriding automatic VRAM-based selection">
         <option value="">auto</option>
@@ -306,6 +354,54 @@
   let messages = [];
   let streaming = false;
   let nCtx = 4096;
+  let stagedImage = null; // { b64, dataURL, name } while an image is attached but unsent
+
+  // Prefixes that mark the two message kinds a folded image produces. The
+  // description turn is context the model reads but the user never sees; the
+  // "[image attached]" turn renders as a chip. Both are plain ChatMessages so
+  // they persist and reload without any schema change.
+  const IMG_DESC_PREFIX = '(image description: ';
+  const IMG_TURN_PREFIX = '[image attached] ';
+
+  const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+
+  function stageImage(file) {
+    if (!file.type.startsWith('image/')) { alert('Please choose an image file.'); return; }
+    if (file.size > MAX_IMAGE_BYTES) { alert('Image is too large (max 8 MB).'); return; }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataURL = reader.result;
+      const b64 = String(dataURL).split(',', 2)[1] || '';
+      stagedImage = { b64, dataURL, name: file.name };
+      $('staged-thumb').src = dataURL;
+      $('staged-name').textContent = file.name;
+      $('staged').hidden = false;
+      $('input').focus();
+    };
+    reader.readAsDataURL(file);
+  }
+
+  function clearStagedImage() {
+    stagedImage = null;
+    $('file').value = '';
+    $('staged-thumb').src = '';
+    $('staged-name').textContent = '';
+    $('staged').hidden = true;
+  }
+
+  async function describeImage(b64) {
+    const r = await fetch('/v1/describe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image_base64: b64 }),
+    });
+    if (!r.ok) {
+      let code = 'HTTP ' + r.status;
+      try { const e = await r.json(); code = e.code || code; } catch (_) { /* keep */ }
+      throw new Error(errorText(code));
+    }
+    return r.json();
+  }
 
   function relTime(iso) {
     const s = Math.floor((Date.now() - new Date(iso)) / 1000);
@@ -349,6 +445,33 @@
     return bubble;
   }
 
+  // appendImageMessage renders a user turn that carried an image: a thumbnail
+  // (live session only — dataURL is null after reload) plus the question text.
+  function appendImageMessage(dataURL, text) {
+    const empty = $('thread').querySelector('.thread-empty');
+    if (empty) empty.remove();
+    const wrap = document.createElement('div');
+    wrap.className = 'msg msg-user';
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    if (dataURL) {
+      const img = document.createElement('img');
+      img.className = 'thumb';
+      img.src = dataURL;
+      img.alt = 'attached image';
+      bubble.appendChild(img);
+    } else {
+      const ph = document.createElement('span');
+      ph.className = 'img-placeholder';
+      ph.textContent = '🖼';
+      bubble.appendChild(ph);
+    }
+    bubble.appendChild(document.createTextNode(text));
+    wrap.appendChild(bubble);
+    $('thread').appendChild(wrap);
+    $('thread').scrollTop = $('thread').scrollHeight;
+  }
+
   function showTyping() {
     const empty = $('thread').querySelector('.thread-empty');
     if (empty) empty.remove();
@@ -366,6 +489,11 @@
     $('thread').innerHTML = '';
     if (messages.length === 0) { clearThread(); return; }
     for (const m of messages) {
+      if (m._hidden || m.content.startsWith(IMG_DESC_PREFIX)) continue; // context only
+      if (m.content.startsWith(IMG_TURN_PREFIX)) {
+        appendImageMessage(m._image || null, m.content.slice(IMG_TURN_PREFIX.length));
+        continue;
+      }
       appendMessage(m.role === 'assistant' ? 'assistant' : m.role === 'user' ? 'user' : 'assistant', m.content);
     }
   }
@@ -485,8 +613,37 @@
     streaming = true;
     $('send').disabled = true;
 
-    messages.push({ role: 'user', content: text });
-    appendMessage('user', text);
+    const img = stagedImage; // capture; may be null
+    let addedTurns = 1;      // how many entries to pop from messages on failure
+
+    if (img) {
+      // Fold the image into the conversation: run the perception hop, then push
+      // a visible "[image attached]" turn plus a hidden description turn the
+      // model reads. After that it's an ordinary text conversation.
+      $('send').textContent = 'Reading image…';
+      let desc;
+      try {
+        const d = await describeImage(img.b64);
+        desc = d.description || '';
+      } catch (e) {
+        appendMessage('error', 'Could not read the image: ' + e.message);
+        streaming = false;
+        $('send').disabled = false;
+        $('send').textContent = 'Send';
+        return;
+      }
+      $('send').textContent = 'Send';
+
+      messages.push({ role: 'user', content: IMG_TURN_PREFIX + text, _image: img.dataURL });
+      messages.push({ role: 'user', content: IMG_DESC_PREFIX + desc + ')', _hidden: true });
+      appendImageMessage(img.dataURL, text);
+      clearStagedImage();
+      addedTurns = 2;
+    } else {
+      messages.push({ role: 'user', content: text });
+      appendMessage('user', text);
+    }
+
     $('input').value = '';
     autoGrow();
 
@@ -494,14 +651,16 @@
       await streamAssistant($('tier').value);
       await persist();
     } catch (e) {
-      // Error bubble already shown. Drop the unanswered user turn and restore it
-      // to the input so the send can be retried without doubling the history.
-      messages.pop();
+      // Error bubble already shown. Drop the unanswered turn(s) and restore the
+      // text so the send can be retried without doubling the history.
+      for (let i = 0; i < addedTurns; i++) messages.pop();
+      rebuildThread();
       $('input').value = text;
       autoGrow();
     } finally {
       streaming = false;
       $('send').disabled = false;
+      $('send').textContent = 'Send';
       refreshStatus();
       refreshList();
       updateCtxWarn();
@@ -512,11 +671,15 @@
   async function persist() {
     if (messages.length === 0) return;
     if (!convId) convId = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now())).replace(/-/g, '');
+    // Strip client-only fields (_image data URLs, _hidden flags) — only
+    // {role, content} is persisted. The content prefixes let load() re-derive
+    // which turns are the folded-image pair.
+    const wire = messages.map(m => ({ role: m.role, content: m.content }));
     try {
       const r = await fetch('/v1/chats/' + convId, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages }),
+        body: JSON.stringify({ messages: wire }),
       });
       $('save-state').hidden = r.ok;
     } catch (e) {
@@ -540,6 +703,7 @@
   function newConversation() {
     convId = null;
     messages = [];
+    clearStagedImage();
     clearThread();
     $('ctx-warn').hidden = true;
     $('save-state').hidden = true;
@@ -619,6 +783,9 @@
   });
   $('new-chat').addEventListener('click', newConversation);
   $('delete-chat').addEventListener('click', deleteConversation);
+  $('attach').addEventListener('click', () => $('file').click());
+  $('file').addEventListener('change', e => { if (e.target.files[0]) stageImage(e.target.files[0]); });
+  $('staged-clear').addEventListener('click', clearStagedImage);
 
   // n_ctx is picked up from the first /v1/tokenize call (updateCtxWarn) — no
   // need to hit /v1/model/props on load, which used to force a cold model spawn.
