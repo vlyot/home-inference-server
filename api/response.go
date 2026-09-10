@@ -136,6 +136,14 @@ type ModelPropsResponse struct {
 	ModelLoaded bool `json:"model_loaded"`
 }
 
+// DescribeResponse is the body returned by POST /v1/describe.
+type DescribeResponse struct {
+	// Description is the vision model's literal inventory of the image.
+	Description string `json:"description"`
+	// ModelTier is the tier that produced the description (e.g. "weak").
+	ModelTier string `json:"model_tier"`
+}
+
 // ErrorResponse is the body returned on any 4xx or 5xx response.
 type ErrorResponse struct {
 	// Code is a machine-readable error token matching one of the ErrCode* constants.

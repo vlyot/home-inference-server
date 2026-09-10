@@ -285,6 +285,58 @@ func TestNew_DefaultsDescriptionMaxTokens(t *testing.T) {
 	}
 }
 
+func TestDescribe_RunsPerceiveOnlyAndEvicts(t *testing.T) {
+	log := []string{}
+	perceive := &fakeStage{name: "perceive", log: &log, inferResp: backend.Response{Output: "a red square", ModelTier: "weak"}}
+	reason := &fakeStage{name: "reason", log: &log}
+
+	b := New(perceive, reason, testSpec())
+	desc, tier, err := b.Describe(context.Background(), []byte{1, 2, 3})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if desc != "a red square" || tier != "weak" {
+		t.Errorf("got (%q, %q); want (a red square, weak)", desc, tier)
+	}
+	if !equal(log, []string{"perceive.Infer", "perceive.Shutdown"}) {
+		t.Errorf("call log = %v; want perceive Infer then Shutdown, reason untouched", log)
+	}
+}
+
+func TestDescribe_PerceiveErrorPropagates(t *testing.T) {
+	log := []string{}
+	perceive := &fakeStage{name: "perceive", log: &log, inferErr: &backend.BackendError{Code: "timeout", Message: "slow"}}
+	reason := &fakeStage{name: "reason", log: &log}
+
+	b := New(perceive, reason, testSpec())
+	desc, _, err := b.Describe(context.Background(), []byte{1})
+	be := &backend.BackendError{}
+	if !errors.As(err, &be) || be.Code != "timeout" {
+		t.Fatalf("err = %v; want BackendError timeout", err)
+	}
+	if desc != "" {
+		t.Errorf("desc = %q; want empty on error", desc)
+	}
+}
+
+func TestDescribe_UsesPerceptionPromptAndMaxTokens(t *testing.T) {
+	log := []string{}
+	perceive := &fakeStage{name: "perceive", log: &log, inferResp: backend.Response{Output: "x"}}
+	b := New(perceive, &fakeStage{name: "r", log: &log}, testSpec())
+	if _, _, err := b.Describe(context.Background(), []byte{9}); err != nil {
+		t.Fatal(err)
+	}
+	if perceive.lastReq.Prompt != testSpec().PerceptionPrompt {
+		t.Errorf("perceive prompt = %q; want the spec perception prompt", perceive.lastReq.Prompt)
+	}
+	if perceive.lastReq.MaxTokens != 256 { // testSpec sets DescriptionMaxTokens: 256
+		t.Errorf("perceive MaxTokens = %d; want 256", perceive.lastReq.MaxTokens)
+	}
+	if len(perceive.lastReq.ImageData) == 0 {
+		t.Error("perceive request missing image data")
+	}
+}
+
 // --- helpers ---
 
 func equal(a, b []string) bool {

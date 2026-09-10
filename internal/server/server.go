@@ -65,6 +65,13 @@ type Tokenizer interface {
 	NCtx(ctx context.Context) (int, error)
 }
 
+// Describer runs the vision perception hop only (image in, literal text
+// description out). Satisfied by *pipeline.Backend. Powers POST /v1/describe,
+// which the chat UI uses to fold an image into a text conversation.
+type Describer interface {
+	Describe(ctx context.Context, imageData []byte) (description string, modelTier string, err error)
+}
+
 // LogSource is satisfied by *logbuf.Buffer; it backs the GET /v1/logs route.
 type LogSource interface {
 	Query(level, event string, since time.Duration, limit int) []logbuf.Record
@@ -106,6 +113,7 @@ type Server struct {
 
 	chatStore ChatStore // may be nil; when nil the /v1/chats* routes 404
 	tokenizer Tokenizer // may be nil; when nil /v1/tokenize + /v1/model/props 501
+	describer Describer // may be nil; when nil /v1/describe 501
 	logs      LogSource // may be nil; when nil /v1/logs 501
 
 	// draining, when set (POST /v1/admin/drain), makes handleInfer reject new
@@ -172,6 +180,9 @@ func (s *Server) SetChatStore(store ChatStore) { s.chatStore = store }
 // SetTokenizer wires the tokenize/props proxy for the chat UI's context meter.
 func (s *Server) SetTokenizer(t Tokenizer) { s.tokenizer = t }
 
+// SetDescriber wires the perception-only endpoint POST /v1/describe. nil ⇒ 501.
+func (s *Server) SetDescriber(d Describer) { s.describer = d }
+
 // SetLogSource wires the in-memory log buffer for the /v1/logs route.
 func (s *Server) SetLogSource(l LogSource) { s.logs = l }
 
@@ -218,6 +229,7 @@ var methodGuarded = map[string]string{
 	api.PathTokenize:       http.MethodPost,
 	api.PathModelProps:     http.MethodGet,
 	api.PathLogs:           http.MethodGet,
+	api.PathDescribe:       http.MethodPost,
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -240,6 +252,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleTokenize(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == api.PathModelProps:
 		s.handleModelProps(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == api.PathDescribe:
+		s.handleDescribe(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == api.PathLogs:
 		s.handleLogs(w, r)
 	case r.URL.Path == api.PathChats:

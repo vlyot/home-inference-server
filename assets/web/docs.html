@@ -683,6 +683,11 @@ The client just parses <code>output</code> as JSON.</p>
       <td class="field-desc">Body <code>{"text": "..."}</code> → <code>{"tokens": &lt;int&gt;, "n_ctx": &lt;int&gt;, "model_loaded": bool}</code>. With a model loaded, <code>tokens</code> is exact and <code>model_loaded: true</code>; otherwise it is a whitespace-word estimate with <code>model_loaded: false</code> (no model is started).</td>
     </tr>
     <tr>
+      <td class="field-name">POST /v1/describe</td>
+      <td class="field-type">DescribeResponse</td>
+      <td class="field-desc">Body <code>{"image_base64": "..."}</code> → <code>{"description": "...", "model_tier": "weak"}</code>. Runs <strong>only</strong> the vision perception hop (SmolVLM2 loads, describes the image literally, evicts) — no reasoning tier is touched. Used by the built-in Chat UI to fold an image into a text conversation: it calls this on image attach, then inserts the returned description as a hidden context turn so every follow-up question is answered with the image in context, without re-running vision per turn. Bad base64 or an empty field → <code>400</code>; a cold-load timeout → <code>408</code>; <code>501</code> if no vision pipeline is wired.</td>
+    </tr>
+    <tr>
       <td class="field-name">GET /v1/chats</td>
       <td class="field-type">ConversationMeta[]</td>
       <td class="field-desc">List of stored conversations (newest-updated first), each: <code>id</code>, <code>title</code>, <code>created_at</code>, <code>updated_at</code>, <code>turn_count</code>. Up to 5 are kept; the oldest is evicted on overflow. Stored as JSON files on the server host only.</td>
@@ -731,7 +736,8 @@ when opened on the server itself</strong>; every control returns <code>404</code
 from a non-loopback device, see <a href="#admin">Admin / maintenance</a>),
 <code>/docs</code> (this page), <code>/vendor/*</code> (the chat UI's embedded
 markdown libraries).</p>
-<p>The <code>/v1/chats*</code>, <code>/v1/tokenize</code>, and <code>/v1/model/props</code> endpoints back the built-in chat UI at <code>GET /chat</code>. Chat persistence is local to the server host (default <code>%LOCALAPPDATA%\home-inference-server\chats\</code>, override with <code>--chats-dir</code> or <code>CHATS_DIR</code>); nothing leaves the machine. The <code>/v1/logs</code> endpoint backs the Logs UI at <code>GET /logs</code>.</p>
+<p>The <code>/v1/chats*</code>, <code>/v1/tokenize</code>, <code>/v1/model/props</code> and <code>/v1/describe</code> endpoints back the built-in chat UI at <code>GET /chat</code>. Chat persistence is local to the server host (default <code>%LOCALAPPDATA%\home-inference-server\chats\</code>, override with <code>--chats-dir</code> or <code>CHATS_DIR</code>); nothing leaves the machine. The <code>/v1/logs</code> endpoint backs the Logs UI at <code>GET /logs</code>.</p>
+<p><strong>Images in chat.</strong> The chat UI has a 📎 attach button. On attach it calls <code>POST /v1/describe</code>, then folds the description into the conversation as a hidden turn — so the image is answered by a normal streaming <em>text</em> request and every follow-up keeps the image in context without re-running vision. The image thumbnail is shown in the live session but not persisted; a reloaded chat shows an <code>[image attached]</code> placeholder, and follow-ups still work because the description turn <em>is</em> saved.</p>
 
 <h3>Running on a LAN</h3>
 <p>The local API is <strong>unauthenticated by default</strong>. To expose it

@@ -339,6 +339,7 @@ func TestWrongMethodReturns405(t *testing.T) {
 		{http.MethodDelete, api.PathStatus},
 		{http.MethodPost, api.PathHealth},
 		{http.MethodGet, api.PathTokenize},
+		{http.MethodGet, api.PathDescribe},
 	} {
 		req, _ := http.NewRequest(tc.method, h.ts.URL+tc.path, nil)
 		resp, err := http.DefaultClient.Do(req)

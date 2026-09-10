@@ -187,6 +187,19 @@ func (b *Backend) InferStream(ctx context.Context, req backend.Request, chunkFn 
 	return resp, nil
 }
 
+// Describe runs only the perception hop: it loads the perceive model, gets a
+// literal description of the image, and evicts the model — the reason stage is
+// never touched. Used by callers (the chat UI) that want to fold an image into
+// a text conversation as a description turn rather than run a full vision
+// inference per follow-up. A perceive-stage BackendError propagates unchanged.
+func (b *Backend) Describe(ctx context.Context, imageData []byte) (description, modelTier string, err error) {
+	resp, err := b.perceiveThenEvict(ctx, backend.Request{ImageData: imageData})
+	if err != nil {
+		return "", "", err
+	}
+	return resp.Output, resp.ModelTier, nil
+}
+
 // Shutdown shuts down the perceive stage. The reason stage is borrowed and its
 // lifecycle is the caller's responsibility.
 func (b *Backend) Shutdown(ctx context.Context) error {
