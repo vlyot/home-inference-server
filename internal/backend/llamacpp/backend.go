@@ -202,9 +202,12 @@ func (b *Backend) InferStream(ctx context.Context, req backend.Request, chunkFn 
 }
 
 // runComplete dispatches to the chat-completions endpoint when the request
-// carries a message list, otherwise the single-prompt completion endpoint.
+// carries a message list OR an image (the /completion endpoint has no chat
+// template and no --mmproj image path), otherwise the single-prompt endpoint.
+// A prompt-only image request is promoted to a one-turn user message so
+// toChatMessages can attach the image_url part.
 func (b *Backend) runComplete(ctx context.Context, baseURL string, req backend.Request) (backend.Response, error) {
-	if len(req.Messages) > 0 {
+	if req := chatShape(req); len(req.Messages) > 0 {
 		req.MaxTokens = b.resolveChatMaxTokens(ctx, baseURL, req)
 		return chatComplete(ctx, baseURL, req)
 	}
@@ -215,13 +218,25 @@ func (b *Backend) runComplete(ctx context.Context, baseURL string, req backend.R
 // /completion endpoint has no chat template and therefore no reasoning
 // concept, so its deltas are always tagged ChunkContent.
 func (b *Backend) runCompleteStream(ctx context.Context, baseURL string, req backend.Request, chunkFn func(kind backend.ChunkKind, delta string)) (backend.Response, error) {
-	if len(req.Messages) > 0 {
+	if req := chatShape(req); len(req.Messages) > 0 {
 		req.MaxTokens = b.resolveChatMaxTokens(ctx, baseURL, req)
 		return chatCompleteStream(ctx, baseURL, req, chunkFn)
 	}
 	return completeStream(ctx, baseURL, req, func(delta string) {
 		chunkFn(backend.ChunkContent, delta)
 	})
+}
+
+// chatShape returns req unchanged when it already has Messages, and otherwise —
+// only if it carries an image — wraps its Prompt as a single user turn so the
+// chat/completions (--mmproj) path is used. A prompt-only text request is left
+// alone so it still takes the plain /completion endpoint.
+func chatShape(req backend.Request) backend.Request {
+	if len(req.Messages) > 0 || len(req.ImageData) == 0 {
+		return req
+	}
+	req.Messages = []backend.Message{{Role: "user", Content: req.Prompt}}
+	return req
 }
 
 // chatMaxTokensSafetyMarginPct reserves this percentage of the model's total
@@ -502,7 +517,7 @@ func (b *Backend) ensureRunning(ctx context.Context) (string, error) {
 		}
 	}
 	resident := vram.GPUResidentMB(b.desc.RequiredVRAMMB, vram.ScaledKVOverheadMB(b.desc, b.maxParallel), gpuLayers, b.desc.TotalLayers)
-	proc := newProcess(b.exe, b.desc.FilePath, string(b.desc.TierLabel), gpuLayers, port, b.maxParallel)
+	proc := newProcess(b.exe, b.desc.FilePath, b.desc.MMProjPath, string(b.desc.TierLabel), gpuLayers, port, b.maxParallel)
 
 	slog.Info("model loading",
 		slog.String(logschema.FieldEvent, string(logschema.EventModelLoading)),

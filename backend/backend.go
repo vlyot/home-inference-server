@@ -1,6 +1,9 @@
 package backend
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+)
 
 // ModalityKind identifies which type of inference a Backend handles.
 type ModalityKind string
@@ -53,6 +56,10 @@ type Request struct {
 	PreferredTier string
 	// Stream requests a streaming SSE response instead of a single blocking JSON body.
 	Stream bool
+	// ResponseFormat, when set, is forwarded verbatim as the chat-completions
+	// "response_format" so llama-server constrains sampling to the schema. Only
+	// the Messages path honours it. Nil = unconstrained.
+	ResponseFormat json.RawMessage
 }
 
 // Response is what a Backend returns after inference completes.

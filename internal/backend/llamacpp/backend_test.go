@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -231,6 +232,7 @@ func chatStub(t *testing.T) (*httptest.Server, *stubState) {
 		json.NewDecoder(r.Body).Decode(&body)
 		st.lastChatMessages = len(body.Messages)
 		st.lastMaxTokens = body.MaxTokens
+		st.lastResponseFormat = string(body.ResponseFormat)
 		resp := chatResp{}
 		resp.Choices = append(resp.Choices, struct {
 			Message struct {
@@ -257,11 +259,12 @@ func chatStub(t *testing.T) (*httptest.Server, *stubState) {
 }
 
 type stubState struct {
-	completionHits   int
-	chatHits         int
-	propsHits        int
-	lastChatMessages int
-	lastMaxTokens    int
+	completionHits     int
+	chatHits           int
+	propsHits          int
+	lastChatMessages   int
+	lastMaxTokens      int
+	lastResponseFormat string
 }
 
 func TestInfer_UsesChatEndpointWhenMessagesPresent(t *testing.T) {
@@ -299,6 +302,145 @@ func TestInfer_UsesCompletionEndpointForPromptOnly(t *testing.T) {
 	}
 	if st.completionHits != 1 || st.chatHits != 0 {
 		t.Fatalf("completionHits=%d chatHits=%d; want 1/0", st.completionHits, st.chatHits)
+	}
+}
+
+func TestToChatMessages_PlainWhenNoImage(t *testing.T) {
+	msgs := toChatMessages(backend.Request{
+		Messages: []backend.Message{
+			{Role: "system", Content: "sys"},
+			{Role: "user", Content: "hi"},
+		},
+	})
+	for i, m := range msgs {
+		if _, ok := m.Content.(string); !ok {
+			t.Errorf("message %d Content is %T; want string", i, m.Content)
+		}
+	}
+}
+
+func TestToChatMessages_MultiPartWhenImagePresent(t *testing.T) {
+	pngMagic := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0, 0, 0, 0}
+	msgs := toChatMessages(backend.Request{
+		Messages: []backend.Message{
+			{Role: "system", Content: "sys"},
+			{Role: "user", Content: "what is this?"},
+		},
+		ImageData: pngMagic,
+	})
+	if _, ok := msgs[0].Content.(string); !ok {
+		t.Errorf("system turn Content = %T; want string", msgs[0].Content)
+	}
+	parts, ok := msgs[1].Content.([]contentPart)
+	if !ok {
+		t.Fatalf("user turn Content = %T; want []contentPart", msgs[1].Content)
+	}
+	if len(parts) != 2 || parts[0].Type != "text" || parts[0].Text != "what is this?" {
+		t.Errorf("part[0] = %+v; want text 'what is this?'", parts[0])
+	}
+	if parts[1].Type != "image_url" || parts[1].ImageURL == nil ||
+		!strings.HasPrefix(parts[1].ImageURL.URL, "data:image/png;base64,") {
+		t.Errorf("part[1] = %+v; want image_url data:image/png", parts[1])
+	}
+}
+
+func TestSniffMIME_DetectsCommonFormats(t *testing.T) {
+	cases := []struct {
+		name string
+		b    []byte
+		want string
+	}{
+		{"jpeg", []byte{0xFF, 0xD8, 0xFF, 0xE0}, "image/jpeg"},
+		{"png", []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}, "image/png"},
+		{"webp", append([]byte("RIFF\x00\x00\x00\x00WEBP"), 0), "image/webp"},
+		{"gif", []byte("GIF89a\x00"), "image/gif"},
+		{"garbage", []byte{0x01, 0x02, 0x03, 0x04}, "image/jpeg"},
+		{"empty", nil, "image/jpeg"},
+	}
+	for _, tc := range cases {
+		if got := sniffMIME(tc.b); got != tc.want {
+			t.Errorf("%s: sniffMIME = %q; want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestChatComplete_ForwardsResponseFormat(t *testing.T) {
+	srv, st := chatStub(t)
+	b := makeTestBackend(srv.URL)
+
+	rf := json.RawMessage(`{"type":"json_schema","json_schema":{"name":"x","schema":{"type":"object"}}}`)
+	_, err := b.Infer(context.Background(), backend.Request{
+		Messages:       []backend.Message{{Role: "user", Content: "hi"}},
+		ResponseFormat: rf,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if st.lastResponseFormat != string(rf) {
+		t.Errorf("forwarded response_format = %q; want %q", st.lastResponseFormat, string(rf))
+	}
+}
+
+func TestChatComplete_NoResponseFormatWhenUnset(t *testing.T) {
+	srv, st := chatStub(t)
+	b := makeTestBackend(srv.URL)
+
+	_, err := b.Infer(context.Background(), backend.Request{
+		Messages: []backend.Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if st.lastResponseFormat != "" {
+		t.Errorf("response_format = %q; want empty (omitted)", st.lastResponseFormat)
+	}
+}
+
+func TestChatComplete_InvalidGrammarMapsTo400Code(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		// Wording matches what llama-server actually returns for a bad schema.
+		w.Write([]byte(`{"error":{"code":400,"message":"Unable to generate parser for this template. JSON schema conversion failed","type":"invalid_request_error"}}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	b := makeTestBackend(srv.URL)
+	_, err := b.Infer(context.Background(), backend.Request{
+		Messages:       []backend.Message{{Role: "user", Content: "hi"}},
+		ResponseFormat: json.RawMessage(`{"type":"json_schema"}`),
+	})
+	be := &backend.BackendError{}
+	if !errors.As(err, &be) {
+		t.Fatalf("expected BackendError, got %T: %v", err, err)
+	}
+	if be.Code != "invalid_grammar" {
+		t.Errorf("code = %q; want invalid_grammar", be.Code)
+	}
+}
+
+func TestChatComplete_Non400StaysModelLoadFailed(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte("loading model"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	b := makeTestBackend(srv.URL)
+	_, err := b.Infer(context.Background(), backend.Request{
+		Messages: []backend.Message{{Role: "user", Content: "hi"}},
+	})
+	be := &backend.BackendError{}
+	if !errors.As(err, &be) {
+		t.Fatalf("expected BackendError, got %T", err)
+	}
+	if be.Code != "model_load_failed" {
+		t.Errorf("code = %q; want model_load_failed", be.Code)
 	}
 }
 
@@ -686,29 +828,45 @@ func TestEnsureRunning_StaleReadyReloadsRatherThanTrustingDeadProc(t *testing.T)
 
 // --- --parallel spawn args + per-request tok/sec normalisation ---
 
+func argsHave(args []string, want string) bool {
+	for _, a := range args {
+		if a == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestSpawnArgsIncludeParallelAndContBatching(t *testing.T) {
-	p := newProcess("llama-server", `models\m.gguf`, "strong", -1, 8092, 3)
+	p := newProcess("llama-server", `models\m.gguf`, "", "strong", -1, 8092, 3)
 	args := p.spawnArgs()
 
-	has := func(w string) bool {
-		for _, a := range args {
-			if a == w {
-				return true
-			}
-		}
-		return false
-	}
 	for _, w := range []string{"--parallel", "3", "--cont-batching"} {
-		if !has(w) {
+		if !argsHave(args, w) {
 			t.Errorf("spawn args %v missing %q", args, w)
 		}
 	}
 }
 
 func TestNewProcessClampsParallelToOne(t *testing.T) {
-	p := newProcess("llama-server", "m", "weak", -1, 8090, 0)
+	p := newProcess("llama-server", "m", "", "weak", -1, 8090, 0)
 	if p.parallel != 1 {
 		t.Errorf("parallel = %d; want 1 (clamped)", p.parallel)
+	}
+}
+
+func TestSpawnArgsIncludeMMProjWhenSet(t *testing.T) {
+	p := newProcess("llama-server", `models\m.gguf`, `models\mmproj.gguf`, "weak", -1, 8094, 1)
+	args := p.spawnArgs()
+	if !argsHave(args, "--mmproj") || !argsHave(args, `models\mmproj.gguf`) {
+		t.Errorf("spawn args %v missing --mmproj <path>", args)
+	}
+}
+
+func TestSpawnArgsOmitMMProjWhenEmpty(t *testing.T) {
+	p := newProcess("llama-server", `models\m.gguf`, "", "weak", -1, 8090, 1)
+	if argsHave(p.spawnArgs(), "--mmproj") {
+		t.Errorf("spawn args %v should not contain --mmproj when path is empty", p.spawnArgs())
 	}
 }
 

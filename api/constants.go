@@ -65,6 +65,11 @@ const (
 	// draining for maintenance (POST /v1/admin/drain). Read-only endpoints keep
 	// working; retry after /v1/admin/resume or a restart.
 	ErrCodeDraining = "draining"
+	// ErrCodeInvalidGrammar marks a request whose response_format could not be
+	// compiled to a sampling grammar by llama-server (malformed JSON Schema,
+	// unsupported construct). Returned as HTTP 400 — the caller must fix the
+	// schema.
+	ErrCodeInvalidGrammar = "invalid_grammar"
 )
 
 const (

@@ -8,10 +8,21 @@ import (
 
 	"github.com/ngkaichong/home-inference-server/backend"
 	istub "github.com/ngkaichong/home-inference-server/internal/backend/stub"
-	ivision "github.com/ngkaichong/home-inference-server/internal/backend/vision"
 	"github.com/ngkaichong/home-inference-server/internal/queue"
 	"github.com/ngkaichong/home-inference-server/internal/router"
 )
+
+// visionErrBackend is a vision-modality backend that always returns a fixed
+// BackendError — used to prove the router dispatches vision jobs to whatever is
+// registered under ModalityKindVision and surfaces its error.
+type visionErrBackend struct{ code string }
+
+func (v visionErrBackend) Modality() backend.ModalityKind { return backend.ModalityKindVision }
+func (v visionErrBackend) Ready() bool                    { return true }
+func (v visionErrBackend) Shutdown(context.Context) error { return nil }
+func (v visionErrBackend) Infer(context.Context, backend.Request) (backend.Response, error) {
+	return backend.Response{}, &backend.BackendError{Code: v.code, Message: "vision backend stub"}
+}
 
 func makeJob(id string, modality backend.ModalityKind) queue.Job {
 	return queue.Job{
@@ -78,7 +89,7 @@ func TestResultWrittenToResultCh(t *testing.T) {
 }
 
 func TestVisionJobRoutesToVisionBackend(t *testing.T) {
-	vb := ivision.New()
+	vb := visionErrBackend{code: "not_implemented"}
 	r := router.New(map[backend.ModalityKind]backend.Backend{
 		backend.ModalityKindText:   istub.New(backend.ModalityKindText, 0),
 		backend.ModalityKindVision: vb,
@@ -99,7 +110,7 @@ func TestVisionJobRoutesToVisionBackend(t *testing.T) {
 func TestRoutesMixedBatchToCorrectBackends(t *testing.T) {
 	r := router.New(map[backend.ModalityKind]backend.Backend{
 		backend.ModalityKindText:   istub.New(backend.ModalityKindText, 0),
-		backend.ModalityKindVision: ivision.New(),
+		backend.ModalityKindVision: visionErrBackend{code: "not_implemented"},
 	})
 
 	textJob := makeJob("txt1", backend.ModalityKindText)

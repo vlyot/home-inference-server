@@ -36,6 +36,7 @@ func ctxSizeValue() int {
 type process struct {
 	exe         string
 	modelPath   string
+	mmprojPath  string // llama-server --mmproj (vision projector); "" = text-only
 	tier        string
 	gpuLayers   int
 	port        int
@@ -59,17 +60,18 @@ var (
 	forceKillFn = func(p *os.Process) error { return p.Kill() }
 )
 
-func newProcess(exe, modelPath, tier string, gpuLayers, port, parallel int) *process {
+func newProcess(exe, modelPath, mmprojPath, tier string, gpuLayers, port, parallel int) *process {
 	if parallel < 1 {
 		parallel = 1
 	}
 	return &process{
-		exe:       exe,
-		modelPath: modelPath,
-		tier:      tier,
-		gpuLayers: gpuLayers,
-		port:      port,
-		parallel:  parallel,
+		exe:        exe,
+		modelPath:  modelPath,
+		mmprojPath: mmprojPath,
+		tier:       tier,
+		gpuLayers:  gpuLayers,
+		port:       port,
+		parallel:   parallel,
 	}
 }
 
@@ -79,7 +81,7 @@ func (p *process) spawnArgs() []string {
 	if p.testArgs != nil {
 		return p.testArgs
 	}
-	return []string{
+	args := []string{
 		"--model", p.modelPath,
 		"--n-gpu-layers", strconv.Itoa(p.gpuLayers),
 		"--port", strconv.Itoa(p.port),
@@ -88,6 +90,10 @@ func (p *process) spawnArgs() []string {
 		"--cont-batching",
 		"--no-mmap",
 	}
+	if p.mmprojPath != "" {
+		args = append(args, "--mmproj", p.mmprojPath)
+	}
+	return args
 }
 
 // Start spawns llama-server and waits until its /health endpoint returns 200.

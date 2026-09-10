@@ -14,6 +14,10 @@ type ModelDescriptor struct {
 	TierLabel ModelTierLabel `json:"tier_label"`
 	Name      string         `json:"name"`
 	FilePath  string         `json:"file_path"`
+	// MMProjPath is the vision projector (mmproj) GGUF for a multimodal model.
+	// When non-empty it is passed to llama-server as --mmproj, enabling image
+	// input on that subprocess. Empty for text-only models.
+	MMProjPath string `json:"mmproj_path,omitempty"`
 	// RequiredVRAMMB is the expected VRAM footprint for this model in megabytes.
 	RequiredVRAMMB int64  `json:"required_vram_mb"`
 	Modality       string `json:"modality"`

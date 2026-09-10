@@ -17,7 +17,6 @@ import (
 	"github.com/ngkaichong/home-inference-server/api"
 	"github.com/ngkaichong/home-inference-server/backend"
 	"github.com/ngkaichong/home-inference-server/internal/backend/stub"
-	"github.com/ngkaichong/home-inference-server/internal/backend/vision"
 	"github.com/ngkaichong/home-inference-server/internal/batcher"
 	"github.com/ngkaichong/home-inference-server/internal/logbuf"
 	"github.com/ngkaichong/home-inference-server/internal/queue"
@@ -45,8 +44,54 @@ func newMultiModalHarness(t *testing.T, latency time.Duration) *harness {
 	t.Helper()
 	return newHarnessWithBackends(t, map[backend.ModalityKind]backend.Backend{
 		backend.ModalityKindText:   stub.New(backend.ModalityKindText, latency),
-		backend.ModalityKindVision: vision.New(),
+		backend.ModalityKindVision: &fakeVisionBackend{output: "a description of the image"},
 	})
+}
+
+// fakeVisionBackend stands in for the SmolVLM2→Gemma pipeline in server tests.
+// It returns a canned 200 response, or a degraded one when degraded is set, or
+// an error when inferErr is set. recordedReq captures the last request seen.
+type fakeVisionBackend struct {
+	output      string
+	degraded    bool
+	inferErr    error
+	recordedReq backend.Request
+}
+
+func (f *fakeVisionBackend) Modality() backend.ModalityKind   { return backend.ModalityKindVision }
+func (f *fakeVisionBackend) Ready() bool                      { return true }
+func (f *fakeVisionBackend) Shutdown(_ context.Context) error { return nil }
+func (f *fakeVisionBackend) Infer(_ context.Context, req backend.Request) (backend.Response, error) {
+	f.recordedReq = req
+	if f.inferErr != nil {
+		return backend.Response{}, f.inferErr
+	}
+	return backend.Response{
+		Output:          f.output,
+		TokensGenerated: 5,
+		ModelTier:       "weak",
+		QualityDegraded: f.degraded,
+	}, nil
+}
+
+// recordingBackend captures the backend.Request it is handed and returns a
+// canned response or error. Used to assert request-translation behaviour
+// (response_format passthrough) and error mapping at the HTTP layer.
+type recordingBackend struct {
+	modality    backend.ModalityKind
+	recordedReq backend.Request
+	inferErr    error
+}
+
+func (r *recordingBackend) Modality() backend.ModalityKind   { return r.modality }
+func (r *recordingBackend) Ready() bool                      { return true }
+func (r *recordingBackend) Shutdown(_ context.Context) error { return nil }
+func (r *recordingBackend) Infer(_ context.Context, req backend.Request) (backend.Response, error) {
+	r.recordedReq = req
+	if r.inferErr != nil {
+		return backend.Response{}, r.inferErr
+	}
+	return backend.Response{Output: "ok", TokensGenerated: 1, ModelTier: "weak"}, nil
 }
 
 func newHarnessWithBackends(t *testing.T, backends map[backend.ModalityKind]backend.Backend) *harness {
@@ -207,7 +252,7 @@ func TestConcurrentRequests(t *testing.T) {
 	}
 }
 
-func TestVisionInferReturns501NotImplemented(t *testing.T) {
+func TestVisionInfer_RunsPipelineAndReturnsOutput(t *testing.T) {
 	h := newMultiModalHarness(t, 0)
 	imgData := base64.StdEncoding.EncodeToString([]byte("fake-image-bytes"))
 	resp := post(t, h.ts.URL+api.PathInfer, api.InferRequest{
@@ -219,13 +264,57 @@ func TestVisionInferReturns501NotImplemented(t *testing.T) {
 	})
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusNotImplemented {
-		t.Fatalf("want 501, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("want 200, got %d", resp.StatusCode)
+	}
+	var ir api.InferResponse
+	json.NewDecoder(resp.Body).Decode(&ir)
+	if ir.Output == "" {
+		t.Error("expected non-empty vision output")
+	}
+	if ir.Modality != api.ModalityVision {
+		t.Errorf("modality = %q; want vision", ir.Modality)
+	}
+}
+
+func TestVisionInfer_ImageURLReturns400(t *testing.T) {
+	h := newMultiModalHarness(t, 0)
+	resp := post(t, h.ts.URL+api.PathInfer, api.InferRequest{
+		Modality: api.ModalityVision,
+		VisionInput: &api.VisionInput{
+			ImageURL: "https://example.com/photo.jpg",
+			Prompt:   "what is this?",
+		},
+	})
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d", resp.StatusCode)
 	}
 	var er api.ErrorResponse
 	json.NewDecoder(resp.Body).Decode(&er)
-	if er.Code != api.ErrCodeNotImplemented {
-		t.Errorf("want code %q, got %q", api.ErrCodeNotImplemented, er.Code)
+	if er.Code != api.ErrCodeInvalidRequest || !strings.Contains(er.Message, "image_base64") {
+		t.Errorf("er = %+v; want invalid_request mentioning image_base64", er)
+	}
+}
+
+func TestVisionInfer_QualityDegradedHeaderWhenPipelineDegrades(t *testing.T) {
+	h := newHarnessWithBackends(t, map[backend.ModalityKind]backend.Backend{
+		backend.ModalityKindText:   stub.New(backend.ModalityKindText, 0),
+		backend.ModalityKindVision: &fakeVisionBackend{output: "raw description", degraded: true},
+	})
+	imgData := base64.StdEncoding.EncodeToString([]byte("img"))
+	resp := post(t, h.ts.URL+api.PathInfer, api.InferRequest{
+		Modality:    api.ModalityVision,
+		VisionInput: &api.VisionInput{ImageBase64: imgData, Prompt: "describe"},
+	})
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("want 200, got %d", resp.StatusCode)
+	}
+	if got := resp.Header.Get(api.HeaderQualityDegraded); got != "true" {
+		t.Errorf("X-Quality-Degraded = %q; want true", got)
 	}
 }
 
@@ -331,14 +420,14 @@ func TestMixedModalityConcurrent(t *testing.T) {
 	if textOK != 2 {
 		t.Errorf("expected 2 text results on the weak tier, got %d", textOK)
 	}
-	vis501 := 0
+	visOK := 0
 	for code := range visionCodes {
-		if code == http.StatusNotImplemented {
-			vis501++
+		if code == http.StatusOK {
+			visOK++
 		}
 	}
-	if vis501 != 2 {
-		t.Errorf("expected 2 vision requests to return 501, got %d", vis501)
+	if visOK != 2 {
+		t.Errorf("expected 2 vision requests to return 200, got %d", visOK)
 	}
 }
 
@@ -398,6 +487,56 @@ func TestInfer_QualityDegradedHeader(t *testing.T) {
 	}
 	if got := resp.Header.Get(api.HeaderQualityDegraded); got != "true" {
 		t.Errorf("expected X-Quality-Degraded: true, got %q", got)
+	}
+}
+
+// --- structured output (response_format) ---
+
+func TestInfer_ResponseFormatForwardedToBackend(t *testing.T) {
+	rec := &recordingBackend{modality: backend.ModalityKindText}
+	h := newHarnessWithBackends(t, map[backend.ModalityKind]backend.Backend{
+		backend.ModalityKindText: rec,
+	})
+
+	rf := json.RawMessage(`{"type":"json_schema","json_schema":{"name":"x","schema":{"type":"object"}}}`)
+	resp := post(t, h.ts.URL+api.PathInfer, api.InferRequest{
+		Modality:       api.ModalityText,
+		TextInput:      &api.TextInput{Messages: []api.ChatMessage{{Role: "user", Content: "give me json"}}},
+		ResponseFormat: rf,
+	})
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if string(rec.recordedReq.ResponseFormat) != string(rf) {
+		t.Errorf("backend saw response_format %q; want %q", rec.recordedReq.ResponseFormat, rf)
+	}
+}
+
+func TestInfer_InvalidGrammarMapsTo400(t *testing.T) {
+	rec := &recordingBackend{
+		modality: backend.ModalityKindText,
+		inferErr: &backend.BackendError{Code: api.ErrCodeInvalidGrammar, Message: "bad schema"},
+	}
+	h := newHarnessWithBackends(t, map[backend.ModalityKind]backend.Backend{
+		backend.ModalityKindText: rec,
+	})
+
+	resp := post(t, h.ts.URL+api.PathInfer, api.InferRequest{
+		Modality:       api.ModalityText,
+		TextInput:      &api.TextInput{Messages: []api.ChatMessage{{Role: "user", Content: "x"}}},
+		ResponseFormat: json.RawMessage(`{"type":"json_schema"}`),
+	})
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+	var er api.ErrorResponse
+	json.NewDecoder(resp.Body).Decode(&er)
+	if er.Code != api.ErrCodeInvalidGrammar {
+		t.Errorf("code = %q; want invalid_grammar", er.Code)
 	}
 }
 

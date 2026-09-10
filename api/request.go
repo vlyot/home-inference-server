@@ -1,5 +1,7 @@
 package api
 
+import "encoding/json"
+
 // InferRequest is the inbound body for POST /v1/infer.
 // Exactly one of TextInput or VisionInput must be non-nil, matching Modality.
 type InferRequest struct {
@@ -38,6 +40,18 @@ type InferRequest struct {
 	// GPU work. Values: "strong" | "mid" | "weak". Empty means automatic
 	// selection (default). Unlike min_tier, this is an exact pin, not a floor.
 	PreferredTier string `json:"preferred_tier,omitempty"`
+	// ResponseFormat constrains the model's output. It is forwarded verbatim to
+	// llama-server's chat-completions endpoint, which compiles it to a sampling
+	// grammar so the model *cannot* emit non-conforming tokens. Two shapes are
+	// accepted, matching the OpenAI API:
+	//
+	//	{"type": "json_object"}
+	//	{"type": "json_schema", "json_schema": { ... JSON Schema ... }}
+	//
+	// Requires text_input.messages (the chat path) — it has no effect on a
+	// prompt-only request. Adds a small per-token sampling cost. A schema
+	// llama-server rejects returns ErrCodeInvalidGrammar (HTTP 400).
+	ResponseFormat json.RawMessage `json:"response_format,omitempty"`
 }
 
 // TextInput carries a prompt for completion or a message list for chat.

@@ -209,21 +209,80 @@
     }
   }'</code></pre>
 
-<h3>Vision (image URL)</h3>
-<p><strong>Not yet implemented.</strong> <code>modality: "vision"</code> is a
-registered route but returns <code>501 {"code":"not_implemented"}</code> in this
-build. The request shape below is stable for when a multimodal backend is wired
-up; <code>prompt</code> and one of <code>image_base64</code> / <code>image_url</code>
-are required (a missing one is <code>400</code>).</p>
+<h3>Vision (image → text)</h3>
+<p><code>modality: "vision"</code> is served by a two-stage pipeline: a small
+vision model (SmolVLM2 500M) produces an exhaustive literal description of the
+image, then a text tier answers your <code>prompt</code> over that description
+&mdash; see <a href="#vision-pipeline">How vision works</a> below. Send the image
+as <strong><code>image_base64</code></strong> (raw base64, no data-URI prefix).
+<code>image_url</code> is <strong>not</strong> supported and returns
+<code>400</code>. <code>prompt</code> is required.</p>
+<pre><code>IMG=$(base64 -w0 photo.jpg)
+curl -X POST http://localhost:8080/v1/infer \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"modality\": \"vision\",
+    \"vision_input\": {
+      \"image_base64\": \"$IMG\",
+      \"prompt\": \"What is the total amount on this receipt?\"
+    }
+  }"</code></pre>
+<p>A vision request may also carry <code>response_format</code> (see
+<a href="#structured-output">Structured Output</a>) &mdash; the schema is applied
+to the reasoning stage, so you can ask for a JSON object describing the image.</p>
+
+<h3 id="structured-output">Structured Output (JSON mode)</h3>
+<p>Add <code>response_format</code> to any request that uses
+<code>text_input.messages</code> (the chat path). It is forwarded verbatim to
+llama-server, which compiles it to a sampling grammar &mdash; the model
+<em>cannot</em> emit a token that breaks the shape, so no retry loop is needed.
+The client just parses <code>output</code> as JSON.</p>
+<p>Two forms, matching the OpenAI API:</p>
+<pre><code>// 1. JSON Schema — strongest guarantee, recommended
+"response_format": {
+  "type": "json_schema",
+  "json_schema": {
+    "name": "person",
+    "schema": {
+      "type": "object",
+      "properties": { "name": {"type": "string"}, "age": {"type": "integer"} },
+      "required": ["name", "age"]
+    }
+  }
+}
+
+// 2. Loose "just valid JSON"
+"response_format": { "type": "json_object" }</code></pre>
 <pre><code>curl -X POST http://localhost:8080/v1/infer \
   -H "Content-Type: application/json" \
   -d '{
-    "modality": "vision",
-    "vision_input": {
-      "image_url": "https://example.com/photo.jpg",
-      "prompt": "Describe this image."
-    }
-  }'   # -> 501 not_implemented</code></pre>
+    "modality": "text",
+    "text_input": { "messages": [
+      { "role": "user", "content": "Give me a person named Alice, age 30." }
+    ]},
+    "response_format": { "type": "json_schema", "json_schema": {
+      "name": "person",
+      "schema": { "type": "object",
+        "properties": { "name": {"type":"string"}, "age": {"type":"integer"} },
+        "required": ["name","age"] } }
+  }'
+# -> {"output": "{\"name\": \"Alice\", \"age\": 30}", ...}</code></pre>
+<p>Notes:</p>
+<ul>
+  <li>Handled entirely server-side. The client sends the schema and parses the
+    string in <code>output</code> &mdash; nothing else to implement.</li>
+  <li>Prompt-only requests (<code>text_input.prompt</code>) ignore
+    <code>response_format</code>. Use <code>messages</code>.</li>
+  <li>Grammar-constrained decoding is slightly slower per token, and a very small
+    model can occasionally produce valid-but-thin output when a schema is tight.</li>
+  <li>A schema llama-server cannot compile returns <code>400</code>
+    <code>{"code": "invalid_grammar"}</code> with the reason in
+    <code>message</code>.</li>
+  <li>The reasoning-capable strong tier (<code>gemma-4-e4b</code>) may spend its
+    whole token budget "thinking" before the JSON &mdash; give it a generous
+    <code>max_tokens</code>, or pin a non-reasoning tier with
+    <code>preferred_tier</code>.</li>
+</ul>
 
 <h3>Streaming (SSE)</h3>
 <pre><code>curl -N -X POST http://localhost:8080/v1/infer \
@@ -323,7 +382,13 @@ are required (a missing one is <code>400</code>).</p>
       <td class="field-name">preferred_tier</td>
       <td class="field-type">string</td>
       <td class="field-default">"" (automatic)</td>
-      <td class="field-desc">Pins tier selection to exactly this tier instead of the default "largest tier that fits in free VRAM" — e.g. deliberately running the small model to leave VRAM headroom for other GPU work. Values: <code>"strong"</code> | <code>"mid"</code> | <code>"weak"</code>. Unlike <code>min_tier</code> (a floor, never upgraded away from), this is an exact pin: it evicts a larger already-loaded model if needed, and the speed-floor cascade never overrides it. An unrecognized value returns <code>400 invalid_request</code>. Backs the model-tier dropdown in the built-in Chat UI at <code>GET /chat</code>.</td>
+      <td class="field-desc">Pins tier selection to exactly this tier instead of the default "largest tier that fits in free VRAM" — e.g. deliberately running the small model to leave VRAM headroom for other GPU work. Values: <code>"strong"</code> | <code>"mid"</code> | <code>"weak"</code>. Unlike <code>min_tier</code> (a floor, never upgraded away from), this is an exact pin: it evicts a larger already-loaded model if needed, and the speed-floor cascade never overrides it. An unrecognized value returns <code>400 invalid_request</code>. Backs the model-tier dropdown in the built-in Chat UI at <code>GET /chat</code>. For a <code>vision</code> request this pins the <em>reasoning</em> tier; the perception model (SmolVLM2) is fixed.</td>
+    </tr>
+    <tr>
+      <td class="field-name">response_format</td>
+      <td class="field-type">object</td>
+      <td class="field-default">null (unconstrained)</td>
+      <td class="field-desc">Constrains output to a JSON shape. Forwarded verbatim to llama-server, which compiles it to a sampling grammar so the model cannot emit a non-conforming token. Accepts <code>{"type":"json_object"}</code> or <code>{"type":"json_schema","json_schema":{...}}</code> (OpenAI shape). <strong>Requires <code>text_input.messages</code></strong> — ignored on a prompt-only request. On a <code>vision</code> request it is applied to the reasoning stage. A schema llama-server cannot compile returns <code>400 {"code":"invalid_grammar"}</code>. See <a href="#structured-output">Structured Output</a>.</td>
     </tr>
   </tbody>
 </table>
@@ -373,7 +438,7 @@ are required (a missing one is <code>400</code>).</p>
 </div>
 
 <h3>VisionInput</h3>
-<p>Exactly one of <code>image_base64</code> or <code>image_url</code> must be set. <code>prompt</code> is always required.</p>
+<p><code>image_base64</code> and <code>prompt</code> are required.</p>
 <div class="table-wrap">
 <table>
   <thead>
@@ -383,17 +448,17 @@ are required (a missing one is <code>400</code>).</p>
     <tr>
       <td class="field-name">image_base64</td>
       <td class="field-type">string</td>
-      <td class="field-desc">Base64-encoded image bytes. Mutually exclusive with <code>image_url</code>.</td>
+      <td class="field-desc">Raw base64-encoded image bytes (no <code>data:</code> prefix). JPEG, PNG, WebP and GIF are recognised. Required.</td>
     </tr>
     <tr>
       <td class="field-name">image_url</td>
       <td class="field-type">string</td>
-      <td class="field-desc">URL of the image to analyze. Mutually exclusive with <code>image_base64</code>.</td>
+      <td class="field-desc"><strong>Not supported.</strong> Sending it returns <code>400 invalid_request</code> ("image_url is not supported; send the image as image_base64"). Fetch the image yourself and send <code>image_base64</code>.</td>
     </tr>
     <tr>
       <td class="field-name">prompt</td>
       <td class="field-type">string</td>
-      <td class="field-desc">Required. The question or instruction about the image.</td>
+      <td class="field-desc">Required. The question or instruction about the image. This is answered by the reasoning stage over the perception model's description — see <a href="#vision-pipeline">How vision works</a>.</td>
     </tr>
   </tbody>
 </table>
@@ -777,6 +842,8 @@ console.log('Full output:', output);</code></pre>
 <div class="note">
   The streaming path bypasses the batcher and the worker pool — the request goes directly to the backend. It still contends for one of the <code>max_parallel</code> concurrent-inference slots (the same semaphore the pooled requests use), and shares the VRAM-tier selection and pressure-policy logic.
 </div>
+<p>A <code>stream: true</code> <code>vision</code> request runs the perception hop
+blocking (no tokens stream during it), then streams the reasoning hop's deltas.</p>
 </section>
 
 <!-- ─── Pressure Policy ──────────────────────────────────────────────── -->
@@ -854,10 +921,16 @@ There is no local defer queue and no local drain loop.</p>
       <td class="field-desc">Use <code>"text"</code> or <code>"vision"</code>.</td>
     </tr>
     <tr>
+      <td class="field-name">invalid_grammar</td>
+      <td>400</td>
+      <td class="field-desc"><code>response_format</code> could not be compiled to a sampling grammar (malformed JSON Schema, unsupported construct). The reason from llama-server is in <code>message</code>.</td>
+      <td class="field-desc">Fix the schema. Test it against a small request first.</td>
+    </tr>
+    <tr>
       <td class="field-name">not_implemented</td>
       <td>501</td>
-      <td class="field-desc"><code>modality: "vision"</code> — vision inference is not wired up in this build.</td>
-      <td class="field-desc">Use <code>"text"</code>; vision is on the roadmap.</td>
+      <td class="field-desc">A documented capability not wired up in this build. No modality currently returns this — both <code>text</code> and <code>vision</code> are implemented. Reserved for future specialist backends.</td>
+      <td class="field-desc">n/a for the current roster.</td>
     </tr>
     <tr>
       <td class="field-name">unauthorized</td>
@@ -973,13 +1046,44 @@ There is no local defer queue and no local drain loop.</p>
     <tr>
       <td><span class="badge badge-normal">weak</span></td>
       <td class="field-name">smolvlm2-500m-q8_0</td>
-      <td>437 MB</td>
+      <td>437 MB + mmproj</td>
       <td>vision</td>
-      <td class="field-desc">The vision tier. Minimal footprint; used for all <code>modality: "vision"</code> requests.</td>
+      <td class="field-desc">The perception model for <code>modality: "vision"</code>. Runs with its own vision projector (<code>--mmproj</code>) on its own subprocess; produces a literal image description that a text tier then reasons over. Never resident at the same time as a text tier — see <a href="#vision-pipeline">How vision works</a>.</td>
     </tr>
   </tbody>
 </table>
 </div>
+
+<h3 id="vision-pipeline">How vision works (SmolVLM2 &rarr; Gemma pipeline)</h3>
+<p>A <code>modality: "vision"</code> request runs in two hops, and the two models
+are <strong>never loaded at the same time</strong> — so peak VRAM is only what
+the reasoning hop needs and the server still idles at ~0 VRAM.</p>
+<ol style="color:#a1a1aa; line-height:2; padding-left:20px; margin-bottom:10px;">
+  <li><b>Perceive.</b> SmolVLM2 500M is loaded (its weights + vision projector,
+    &lt;1 GB) and asked <em>not</em> your question but a fixed instruction: produce
+    an exhaustive, literal inventory of everything in the image — all text and
+    numbers verbatim, objects, layout, colours. Then its subprocess is shut down
+    and its VRAM freed.</li>
+  <li><b>Reason.</b> That description is handed to the ordinary text roster as a
+    normal chat request: a system turn explaining "you can't see images, here is a
+    description", then your <code>prompt</code>. So tier selection, the speed-floor
+    cascade, <code>min_tier</code>, <code>preferred_tier</code>, deferral and
+    <code>response_format</code> all apply to this hop unchanged.</li>
+</ol>
+<p><b>Latency:</b> roughly 10&ndash;25 s fully cold (two model loads), a few
+seconds when a text tier is already warm from recent traffic.</p>
+<p><b>Degradation:</b> if VRAM pressure is so high that <em>no</em> text tier can
+load at all, the request returns SmolVLM2's raw description as the answer with
+<code>X-Quality-Degraded: true</code> rather than failing. Extreme pressure
+(&lt; 500 MB VRAM AND &gt; 90% CPU) defers like a text request.</p>
+<p><b>Trade-off:</b> the reasoning model only ever sees SmolVLM2's text, never the
+pixels — whatever the perception hop omits, the answer can't recover. For most
+"what does this show / what's the number / summarise this" questions that is
+fine; pixel-exact tasks are weaker than a natively-multimodal model would be.</p>
+<p>This is a general <em>pipeline</em> backend: a future audio or OCR modality is
+added by registering another perceive&rarr;reason pipeline with a different
+perception model and prompt — the core request path does not change. See
+<a href="#specialist-backends">Specialist Backends</a>.</p>
 
 <h3>Tier selection algorithm</h3>
 <p>Per request, on the roster for the request's modality:</p>
@@ -1151,11 +1255,17 @@ DATABASE_URL=… go run ./cmd/memberadd -list                             # show
 <section id="specialist-backends">
 <h2>Specialist Backends</h2>
 
-<p>The router dispatches by <code>modality</code> string to a registered backend. Additional specialist backends — code completion, embeddings, speech-to-text — can be registered as new modality keys without changing the request/response contract or the core pipeline.</p>
+<p>The router dispatches by <code>modality</code> string to a registered backend. Additional specialist backends — code completion, embeddings, speech-to-text — can be registered as new modality keys without changing the request/response contract or the core pipeline (queue &rarr; batcher &rarr; dispatcher &rarr; router).</p>
+
+<p>Two extension shapes exist:</p>
+<ul>
+  <li><b>A plain backend</b> — one model behind the <code>backend.Backend</code> interface, registered under its own modality string (how the text roster works).</li>
+  <li><b>A pipeline backend</b> — a backend that itself orchestrates a <em>perceive</em> sub-backend and a <em>reason</em> sub-backend, evicting the first before running the second so they never share VRAM (how <code>vision</code> works — see <a href="#vision-pipeline">How vision works</a>). An audio modality (a speech model perceiving &rarr; a text tier reasoning), or an OCR specialist, is added the same way: a new pipeline with a different perception model and prompt.</li>
+</ul>
 
 <p>When a specialist backend is added it will be documented here with its modality string, accepted input fields, and response shape. Requests for an unregistered modality return <code>503 unavailable</code>.</p>
 
-<p style="color:#52525b;">No specialist backends are registered in the current build.</p>
+<p style="color:#52525b;">Registered in the current build: <code>text</code> (tiered roster) and <code>vision</code> (SmolVLM2 &rarr; Gemma pipeline). Audio is not — the Gemma&nbsp;4 audio encoder is not yet functional in llama.cpp.</p>
 </section>
 
 </body>

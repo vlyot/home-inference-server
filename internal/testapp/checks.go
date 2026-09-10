@@ -118,14 +118,16 @@ func Checks(caps Caps) []Check {
 
 		// ── vision ───────────────────────────────────────────────────────────
 		{"vision modality", "vision", func(ctx context.Context, c *hisclient.Client) error {
+			// A 1x1 transparent PNG — enough for the perceive stage to run.
+			png1x1 := "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
 			req := api.InferRequest{Modality: api.ModalityVision, VisionInput: &api.VisionInput{
-				Prompt: "Describe this.", ImageBase64: "aGVsbG8=",
+				Prompt: "Describe this.", ImageBase64: png1x1,
 			}}
 			_, err := c.Infer(ctx, req)
-			if caps.StubBackend {
-				return err // stub vision returns a fake 200
-			}
-			return expectAPIError(err, api.ErrCodeNotImplemented, 501)
+			// Both the stub backend and the real SmolVLM2→Gemma pipeline return
+			// a 200 with output. Under extreme VRAM pressure the real pipeline
+			// may return a degraded 200 (X-Quality-Degraded); that still counts.
+			return err
 		}},
 
 		// ── status / introspection ───────────────────────────────────────────

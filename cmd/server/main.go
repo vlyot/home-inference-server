@@ -18,8 +18,8 @@ import (
 	"github.com/ngkaichong/home-inference-server/assets"
 	"github.com/ngkaichong/home-inference-server/backend"
 	"github.com/ngkaichong/home-inference-server/internal/backend/llamacpp"
+	"github.com/ngkaichong/home-inference-server/internal/backend/pipeline"
 	"github.com/ngkaichong/home-inference-server/internal/backend/stub"
-	"github.com/ngkaichong/home-inference-server/internal/backend/vision"
 	"github.com/ngkaichong/home-inference-server/internal/backend/vram"
 	"github.com/ngkaichong/home-inference-server/internal/batcher"
 	"github.com/ngkaichong/home-inference-server/internal/chatstore"
@@ -84,12 +84,15 @@ var defaultRoster = []types.ModelDescriptor{
 		TierLabel:      types.TierWeak,
 		Name:           "smolvlm2-500m-q8_0",
 		FilePath:       `models\smolvlm2-500m-q8_0.gguf`,
+		MMProjPath:     `models\smolvlm2-500m-mmproj-q8_0.gguf`,
 		RequiredVRAMMB: 437,
 		Modality:       "vision",
 		TotalLayers:    32,
-		KVCacheMB:      150,
-		KVFixedMB:      100,
-		Port:           8090,
+		// KV bumped from 150/100 to cover the CLIP vision encoder loaded via
+		// --mmproj. Conservative until measured from llama-server startup logs.
+		KVCacheMB: 180,
+		KVFixedMB: 260,
+		Port:      8094,
 	},
 	{
 		TierLabel:      types.TierWeak,
@@ -191,12 +194,27 @@ func main() {
 		}
 	}
 
+	// The SmolVLM2 vision-perception subprocess. It is not part of a tiered
+	// vram.Backend — the pipeline runs it once per vision request, then evicts
+	// it before the Gemma reasoning hop, so the two are never co-resident.
+	// visionInner stays nil in stub mode.
+	var visionInner *llamacpp.Backend
+	if flagBackend != "stub" && len(visionRoster) > 0 {
+		visionInner = llamacpp.New(backend.ModalityKindVision, visionRoster[0], llamaExe, nvmlProvider, 1)
+	}
+
 	// Reaper kills any stray llama-server left on a roster port by a previous
-	// crash or a failed eviction. "owned" is the live set of our subprocess PIDs.
+	// crash or a failed eviction. "owned" is the live set of our subprocess PIDs
+	// (the text tiers plus the vision-perception subprocess).
 	reaper := vram.NewReaper(rosterPorts, func() map[int]bool {
-		owned := make(map[int]bool, len(llamaInners))
+		owned := make(map[int]bool, len(llamaInners)+1)
 		for _, lb := range llamaInners {
 			if pid := lb.RunningPID(); pid != 0 {
+				owned[pid] = true
+			}
+		}
+		if visionInner != nil {
+			if pid := visionInner.RunningPID(); pid != 0 {
 				owned[pid] = true
 			}
 		}
@@ -221,9 +239,22 @@ func main() {
 
 	vramBackend := vram.New(backend.ModalityKindText, textRoster, vramProvider, textInners, opts)
 
-	var visionBackend backend.Backend = vision.New()
+	// Vision: a SmolVLM2 → Gemma caption-then-reason pipeline. SmolVLM2 (the
+	// perceive stage) produces an exhaustive image description, is evicted, then
+	// the shared text vram.Backend does the actual reasoning — so tier cascade,
+	// speed floors and deferral apply to the reasoning hop for free, and the two
+	// models are never resident together. In stub mode a single fake backend
+	// stands in.
+	var visionBackend backend.Backend
 	if flagBackend == "stub" {
 		visionBackend = stub.New(backend.ModalityKindVision, 0)
+	} else {
+		visionBackend = pipeline.New(visionInner, vramBackend, pipeline.Spec{
+			Modality:             backend.ModalityKindVision,
+			PerceptionPrompt:     pipeline.VisionPerceptionPrompt,
+			ReasonSystemPrompt:   pipeline.VisionReasonSystemPrompt,
+			DescriptionMaxTokens: 512,
+		})
 	}
 
 	backends := map[backend.ModalityKind]backend.Backend{
@@ -394,7 +425,8 @@ func main() {
 		slog.Error("http shutdown error", "err", err)
 	}
 
-	vramBackend.Shutdown(shutdownCtx) //nolint:errcheck
+	vramBackend.Shutdown(shutdownCtx)   //nolint:errcheck
+	visionBackend.Shutdown(shutdownCtx) //nolint:errcheck — evicts the SmolVLM2 subprocess if one is running
 	q.Close()
 	slog.Info("server stopped", slog.String(logschema.FieldEvent, string(logschema.EventServerStop)))
 
