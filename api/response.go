@@ -56,6 +56,15 @@ type StreamChunk struct {
 	// Error is set on the final chunk when inference failed. It carries one of
 	// the ErrCode* tokens; Delta and the summary fields are empty in that case.
 	Error string `json:"error,omitempty"`
+	// Truncated is set on the final chunk when the stream ended early because
+	// the backend failed AFTER some real content was already delivered (e.g.
+	// the model subprocess crashed mid-generation). Distinct from Error: this
+	// is not a failed request — every prior Delta chunk is genuine model
+	// output and should be kept, just incomplete. Error and Truncated are
+	// mutually exclusive; a client should treat Truncated the same as a
+	// normal Done (persist what streamed) while surfacing that it was cut
+	// short, rather than discarding the turn as it would on Error.
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 // PressureSnapshot is the response body for GET /v1/status/pressure.

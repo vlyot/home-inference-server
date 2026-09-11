@@ -205,6 +205,14 @@
     letter-spacing: 2px;
     animation: blink 1.2s steps(3, end) infinite;
   }
+
+  .truncated-note {
+    margin-top: 8px;
+    padding-top: 6px;
+    border-top: 1px dashed #451a03;
+    font-size: 11px;
+    color: #fbbf24;
+  }
   @keyframes blink { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }
 
   .thread-empty {
@@ -360,8 +368,23 @@
   // description turn is context the model reads but the user never sees; the
   // "[image attached]" turn renders as a chip. Both are plain ChatMessages so
   // they persist and reload without any schema change.
+  //
+  // The description turn is pushed with role 'assistant', not 'user': a
+  // reasoning model reading "(image description: ...)" as its own prior turn
+  // treats it as its own remembered perception of the photo and answers
+  // naturally in the first person. Pushed as a 'user' turn instead, it reads
+  // as a document the user handed over for analysis — the model then talks
+  // about "the description you provided" and "since the description cuts
+  // off..." instead of just answering as if it saw the photo. The prefix
+  // still needs to be a marker for hiding it from the transcript UI and
+  // stripping it before persistence.
   const IMG_DESC_PREFIX = '(image description: ';
   const IMG_TURN_PREFIX = '[image attached] ';
+
+  // Appended to a truncated assistant turn's persisted content so a reload
+  // can still show the cut-short indicator (rebuildThread strips the suffix
+  // before rendering the text and re-adds the note instead).
+  const TRUNCATED_SUFFIX = '\n\n[response cut short]';
 
   const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 
@@ -488,13 +511,31 @@
   function rebuildThread() {
     $('thread').innerHTML = '';
     if (messages.length === 0) { clearThread(); return; }
-    for (const m of messages) {
+    // Index-based (not for..of) because the image marker turn and the
+    // question that follows it render as a single bubble — rendering that
+    // pair has to consume two array entries at once.
+    for (let i = 0; i < messages.length; i++) {
+      const m = messages[i];
       if (m._hidden || m.content.startsWith(IMG_DESC_PREFIX)) continue; // context only
       if (m.content.startsWith(IMG_TURN_PREFIX)) {
-        appendImageMessage(m._image || null, m.content.slice(IMG_TURN_PREFIX.length));
+        // The question is the next non-hidden turn (skipping the folded
+        // description turn in between, if present).
+        let j = i + 1;
+        while (j < messages.length && (messages[j]._hidden || messages[j].content.startsWith(IMG_DESC_PREFIX))) j++;
+        const questionText = j < messages.length ? messages[j].content : '';
+        appendImageMessage(m._image || null, questionText);
+        i = j; // skip the consumed question turn
         continue;
       }
-      appendMessage(m.role === 'assistant' ? 'assistant' : m.role === 'user' ? 'user' : 'assistant', m.content);
+      const truncated = m.role === 'assistant' && m.content.endsWith(TRUNCATED_SUFFIX);
+      const text = truncated ? m.content.slice(0, -TRUNCATED_SUFFIX.length) : m.content;
+      const bubble = appendMessage(m.role === 'assistant' ? 'assistant' : m.role === 'user' ? 'user' : 'assistant', text);
+      if (truncated) {
+        const note = document.createElement('div');
+        note.className = 'truncated-note';
+        note.textContent = '⚠ Response cut short — the model stopped unexpectedly.';
+        bubble.appendChild(note);
+      }
     }
   }
 
@@ -524,6 +565,10 @@
     let reasoningAcc = '';
     let buf = '';
     let sawError = false;
+    // Truncated: the backend produced real content, then failed mid-stream
+    // (e.g. a subprocess crash) before finishing. Not an error — what
+    // streamed is genuine model output and is kept, just marked incomplete.
+    let sawTruncated = false;
 
     // Lazily inserts (once) the collapsible "Thinking…" block right before
     // the typing/answer bubble, open while streaming so reasoning is visible
@@ -574,6 +619,7 @@
           let chunk;
           try { chunk = JSON.parse(payload); } catch (e) { continue; }
           if (chunk.error) { sawError = true; throw new Error(errorText(chunk.error)); }
+          if (chunk.truncated) sawTruncated = true;
           if (chunk.reasoning) {
             ensureThinkingBlock();
             reasoningAcc += chunk.reasoning;
@@ -598,7 +644,13 @@
         if (thinkingBody) thinkingBody.closest('.thinking').remove();
         throw new Error(errorText(reasoningAcc ? 'reasoning_exhausted' : 'internal_error'));
       }
-      messages.push({ role: 'assistant', content: acc });
+      if (sawTruncated && bubble) {
+        const note = document.createElement('div');
+        note.className = 'truncated-note';
+        note.textContent = '⚠ Response cut short — the model stopped unexpectedly.';
+        bubble.appendChild(note);
+      }
+      messages.push({ role: 'assistant', content: acc + (sawTruncated ? TRUNCATED_SUFFIX : '') });
     } catch (e) {
       typing.remove();
       if (thinkingBody) thinkingBody.closest('.thinking').remove();
@@ -617,9 +669,17 @@
     let addedTurns = 1;      // how many entries to pop from messages on failure
 
     if (img) {
-      // Fold the image into the conversation: run the perception hop, then push
-      // a visible "[image attached]" turn plus a hidden description turn the
-      // model reads. After that it's an ordinary text conversation.
+      // Fold the image into the conversation: run the perception hop, then
+      // push three turns that keep strict user/assistant alternation so the
+      // model treats the description as its own remembered perception rather
+      // than a document to analyze:
+      //   1. user   — "[image attached]" marker (no question text; the
+      //               question is its own turn below)
+      //   2. assistant (hidden) — the folded description, in the model's own
+      //               voice ("what it saw")
+      //   3. user   — the actual question text
+      // The visible chip bubble still shows image + question together
+      // (appendImageMessage) even though the wire messages split them.
       $('send').textContent = 'Reading image…';
       let desc;
       try {
@@ -634,11 +694,12 @@
       }
       $('send').textContent = 'Send';
 
-      messages.push({ role: 'user', content: IMG_TURN_PREFIX + text, _image: img.dataURL });
-      messages.push({ role: 'user', content: IMG_DESC_PREFIX + desc + ')', _hidden: true });
+      messages.push({ role: 'user', content: IMG_TURN_PREFIX, _image: img.dataURL });
+      messages.push({ role: 'assistant', content: IMG_DESC_PREFIX + desc + ')', _hidden: true });
+      messages.push({ role: 'user', content: text });
       appendImageMessage(img.dataURL, text);
       clearStagedImage();
-      addedTurns = 2;
+      addedTurns = 3;
     } else {
       messages.push({ role: 'user', content: text });
       appendMessage('user', text);

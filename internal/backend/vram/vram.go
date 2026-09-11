@@ -52,6 +52,13 @@ type Options struct {
 	// Infer/InferStream via a semaphore and scales the per-slot KV-cache term
 	// in the VRAM fit/eviction math. Default: 2. Values < 1 are clamped to 1.
 	MaxParallel int
+
+	// VRAMReclaimMaxWait bounds how long waitForVRAMReclaim polls AvailableMB
+	// after an eviction before proceeding to the next load regardless. Zero
+	// uses vramReclaimMaxWait (2s) — the production default. Tests set this
+	// small so a MockVRAMProvider that never reports the reclaimed amount
+	// doesn't cost every tier-switch test the full production timeout.
+	VRAMReclaimMaxWait time.Duration
 }
 
 // DefaultOptions returns sensible defaults.
@@ -165,8 +172,15 @@ const describePrompt = `Describe this image factually: its dominant colours, ` +
 	`written, people and what they are doing, and the overall composition. ` +
 	`Be specific and exhaustive, not interpretive.`
 
-// describeMaxTokens caps a Describe call's output.
-const describeMaxTokens = 512
+// describeMaxTokens caps a Describe call's output. 512 was found too low on
+// the real GPU: describePrompt asks for an "exhaustive" description, and a
+// busy real photo (multiple objects, visible text, cables, etc.) routinely
+// needs more than 512 tokens to finish — it was observed cutting off
+// mid-sentence, which then confuses the reasoning model reading the folded
+// description (it reasons about the description being incomplete rather
+// than just answering). 1024 leaves headroom in the weak tier's 4096-token
+// context after the image's own ~500-1500 vision tokens and the prompt.
+const describeMaxTokens = 1024
 
 // Describe runs a one-shot vision request asking the loaded vision-capable
 // tier for a literal description of imageData, going through the normal
@@ -323,7 +337,12 @@ func (b *Backend) InferStream(ctx context.Context, req backend.Request, chunkFn 
 		}
 	}
 	if err != nil {
-		return backend.Response{}, err
+		// Preserve ModelTier even on error: a caller that already streamed
+		// real content before this error (server_stream.go's mid-crash
+		// salvage path) needs to know which tier produced it. Everything
+		// else about resp is discarded — only tier identity is meaningful
+		// once the request itself has failed.
+		return backend.Response{ModelTier: string(desc.TierLabel)}, err
 	}
 	resp.ModelTier = string(desc.TierLabel)
 	b.markDegraded(&resp, req, desc)
@@ -567,10 +586,34 @@ func (b *Backend) selectAndLoad(ctx context.Context, forced *types.ModelDescript
 			slog.String(logschema.FieldModelTier, string(loaded.TierLabel)),
 			slog.Int64(logschema.FieldVRAMAvailMB, availRaw),
 		)
+		evictedResidentMB := GPUResidentMB(loaded.WeightMB(needsVision), ScaledKVOverheadMB(*loaded, b.opts.MaxParallel, needsVision), loadedLayers, loaded.TotalLayers)
 		b.mu.Lock()
 		toStop := b.evictLocked()
 		b.mu.Unlock()
 		stopInner(toStop)
+		b.waitForVRAMReclaim(availRaw, evictedResidentMB)
+	} else if b.loadedTier != nil && b.loadedVision != needsVision {
+		// A model IS loaded, but in the wrong mode for this request (e.g. weak
+		// stayed resident in vision mode after a /v1/describe call, and this is
+		// now a plain text request). The reuse check above only handles
+		// "same mode, does it still fit" — a mode mismatch must evict
+		// unconditionally before the fresh-VRAM read below, or that read
+		// happens with the mismatched model still fully resident, undercounting
+		// free VRAM and potentially rejecting a tier that would actually fit
+		// once the old load is gone (observed on real hardware as a spurious
+		// 503 overloaded booking headroom against a subprocess about to be
+		// torn down anyway).
+		loaded := b.loadedTier
+		loadedLayers := b.loadedLayers
+		loadedVision := b.loadedVision
+		toStop := b.evictLocked()
+		b.mu.Unlock()
+		beforeAvail, err := b.vram.AvailableMB()
+		stopInner(toStop)
+		if err == nil && beforeAvail >= 0 {
+			evictedResidentMB := GPUResidentMB(loaded.WeightMB(loadedVision), ScaledKVOverheadMB(*loaded, b.opts.MaxParallel, loadedVision), loadedLayers, loaded.TotalLayers)
+			b.waitForVRAMReclaim(beforeAvail, evictedResidentMB)
+		}
 	} else {
 		b.mu.Unlock()
 	}
@@ -641,9 +684,14 @@ func (b *Backend) selectAndLoad(ctx context.Context, forced *types.ModelDescript
 		b.mu.Unlock()
 		return b.loadedTier, nil
 	}
+	var evictedResidentMB int64
+	if b.loadedTier != nil {
+		evictedResidentMB = GPUResidentMB(b.loadedTier.WeightMB(b.loadedVision), ScaledKVOverheadMB(*b.loadedTier, b.opts.MaxParallel, b.loadedVision), b.loadedLayers, b.loadedTier.TotalLayers)
+	}
 	toStop := b.evictLocked()
 	b.mu.Unlock()
 	stopInner(toStop)
+	b.waitForVRAMReclaim(availRaw, evictedResidentMB)
 
 	// Attempt to load chosen tier; retry with next-smaller on OOM.
 	chosenIdx := b.rosterIndex(chosen.TierLabel)
@@ -779,6 +827,67 @@ func stopInner(inner backend.Backend) error {
 		slog.Error("vram: inner backend shutdown reported incomplete teardown — will sweep", slog.Any("err", err))
 	}
 	return err
+}
+
+// vramReclaimPollInterval / vramReclaimMaxWait bound waitForVRAMReclaim.
+const (
+	vramReclaimPollInterval = 100 * time.Millisecond
+	vramReclaimMaxWait      = 2 * time.Second
+)
+
+// waitForVRAMReclaim polls AvailableMB until free VRAM has risen to at least
+// beforeAvail + a fraction of the just-evicted model's resident footprint, or
+// vramReclaimMaxWait elapses. Confirming the OS process has exited (stopInner)
+// is not enough on its own: on Windows the NVIDIA driver releases a CUDA
+// context's VRAM and tears down the context asynchronously relative to
+// process exit, so a new subprocess spawned immediately after can start
+// allocating GPU memory while the old context is still being torn down.
+//
+// This defensive wait was added while chasing a real-hardware crash (a hard,
+// silent llama-server death a few seconds into generation, specifically
+// under a tight VRAM margin that forces partial GPU/CPU offload) that
+// initially looked exactly like this race. It is genuine, community-
+// documented behaviour and worth keeping as cheap insurance (usually a
+// same-tick no-op — VRAM is typically already free by the time stopInner
+// returns), but it turned out NOT to be this crash's actual cause: the poll
+// was repeatedly satisfied on its very first check (0ms) in runs that still
+// crashed. The real cause was llama-server's flash-attention default under
+// partial CUDA offload — see the --flash-attn off comment in
+// llamacpp/process.go's spawnArgs, and the roadmap entry for this phase for
+// the full investigation. The bounded timeout here means a driver that never
+// reports the reclaim (headless/virtualised GPU, buggy NVML) can't wedge a
+// request — it proceeds anyway after vramReclaimMaxWait. beforeAvail is the
+// free-VRAM reading taken before eviction; residentMB is the evicted model's
+// own estimated GPU-resident footprint.
+func (b *Backend) waitForVRAMReclaim(beforeAvail, residentMB int64) {
+	if residentMB <= 0 {
+		return
+	}
+	maxWait := b.opts.VRAMReclaimMaxWait
+	if maxWait <= 0 {
+		maxWait = vramReclaimMaxWait
+	}
+	// Only need to see a good fraction reclaimed, not the exact full amount
+	// back — NVML free VRAM fluctuates with other GPU activity (desktop
+	// compositor, etc.) by a few dozen MB even at rest.
+	want := beforeAvail + residentMB*3/4
+	deadline := time.Now().Add(maxWait)
+	polls := 0
+	start := time.Now()
+	for time.Now().Before(deadline) {
+		polls++
+		avail, err := b.vram.AvailableMB()
+		if err != nil || avail < 0 {
+			slog.Debug("vram: waitForVRAMReclaim aborting (no usable signal)", slog.Int64("avail", avail), slog.Any("err", err), slog.Int("polls", polls))
+			return // no usable signal — proceed rather than wait out the full timeout
+		}
+		if avail >= want {
+			slog.Debug("vram: waitForVRAMReclaim satisfied", slog.Int64("avail", avail), slog.Int64("want", want), slog.Int("polls", polls), slog.Duration("elapsed", time.Since(start)))
+			return
+		}
+		time.Sleep(vramReclaimPollInterval)
+	}
+	slog.Debug("vram: waitForVRAMReclaim gave up at deadline", slog.Int64("want", want), slog.Int("polls", polls))
 }
 
 // detectContention checks whether available VRAM has dropped below the

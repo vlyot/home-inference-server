@@ -44,10 +44,40 @@ func (s *streamStub) InferStream(_ context.Context, _ backend.Request, chunkFn f
 	return backend.Response{TokensGenerated: s.tokens, ModelTier: "weak"}, nil
 }
 
+// crashMidStreamStub emits deltas (real content), then returns an error — the
+// shape of the real-hardware Gemma-4 subprocess crash: some genuine output
+// already streamed before the backend died. errModelTier mirrors what
+// llamacpp.Backend/vram.Backend now carry on the error return (ModelTier set,
+// everything else zeroed).
+type crashMidStreamStub struct {
+	deltas       []string
+	errModelTier string
+}
+
+func (s *crashMidStreamStub) Modality() backend.ModalityKind   { return backend.ModalityKindText }
+func (s *crashMidStreamStub) Ready() bool                      { return true }
+func (s *crashMidStreamStub) Shutdown(_ context.Context) error { return nil }
+func (s *crashMidStreamStub) Infer(_ context.Context, _ backend.Request) (backend.Response, error) {
+	return backend.Response{}, &backend.BackendError{Code: "internal_error", Message: "crashed"}
+}
+func (s *crashMidStreamStub) InferStream(_ context.Context, _ backend.Request, chunkFn func(backend.ChunkKind, string)) (backend.Response, error) {
+	for _, d := range s.deltas {
+		chunkFn(backend.ChunkContent, d)
+	}
+	return backend.Response{ModelTier: s.errModelTier}, &backend.BackendError{Code: "internal_error", Message: "subprocess died mid-stream"}
+}
+
 func streamHarness(t *testing.T, stub *streamStub) *harness {
 	t.Helper()
+	return streamHarnessWithBackend(t, stub)
+}
+
+// streamHarnessWithBackend is streamHarness generalised to any backend.Backend
+// (streamStub, crashMidStreamStub, ...).
+func streamHarnessWithBackend(t *testing.T, b backend.Backend) *harness {
+	t.Helper()
 	backends := map[backend.ModalityKind]backend.Backend{
-		backend.ModalityKindText: stub,
+		backend.ModalityKindText: b,
 	}
 	h := newHarnessWithBackends(t, backends)
 	h.srv.SetBackends(backends) // enable the SSE dispatch path
@@ -126,6 +156,76 @@ func TestStreamNormalOutputStillEndsWithSuccessChunk(t *testing.T) {
 	}
 	if done.TokensGenerated != 2 {
 		t.Errorf("tokens_generated = %d; want 2", done.TokensGenerated)
+	}
+}
+
+// TestStreamCrashAfterContentIsSalvagedAsTruncated guards a real-hardware
+// finding: a mid-stream subprocess crash (the roadmap's Gemma-4 SWA-attention
+// upstream bug — llama-server dies with no error text partway through a long
+// generation) must not discard content already delivered to the client. The
+// terminal chunk should be Truncated, not Error, and prior deltas must have
+// reached the client.
+func TestStreamCrashAfterContentIsSalvagedAsTruncated(t *testing.T) {
+	stub := &crashMidStreamStub{deltas: []string{"The image ", "shows a "}, errModelTier: "strong"}
+	h := streamHarnessWithBackend(t, stub)
+
+	resp := post(t, h.ts.URL+api.PathInfer, api.InferRequest{
+		Modality:  api.ModalityText,
+		TextInput: &api.TextInput{Messages: []api.ChatMessage{{Role: "user", Content: "hi"}}},
+		Stream:    true,
+	})
+	defer resp.Body.Close()
+
+	chunks := readSSEChunks(t, resp)
+	if len(chunks) < 3 { // 2 deltas + terminal
+		t.Fatalf("want 2 delta chunks + a terminal chunk, got %d: %+v", len(chunks), chunks)
+	}
+	var gotDeltas string
+	for _, c := range chunks[:len(chunks)-1] {
+		gotDeltas += c.Delta
+	}
+	if gotDeltas != "The image shows a " {
+		t.Errorf("deltas received = %q; want the pre-crash content preserved", gotDeltas)
+	}
+	last := chunks[len(chunks)-1]
+	if !last.Done {
+		t.Error("terminal chunk not marked done")
+	}
+	if last.Error != "" {
+		t.Errorf("terminal chunk Error = %q; want empty (salvaged, not an error)", last.Error)
+	}
+	if !last.Truncated {
+		t.Error("terminal chunk Truncated = false; want true")
+	}
+	if last.ModelTier != "strong" {
+		t.Errorf("terminal chunk ModelTier = %q; want %q (preserved from the crash)", last.ModelTier, "strong")
+	}
+}
+
+// TestStreamCrashBeforeAnyContentIsStillAnError guards the other half of the
+// same logic: if the backend fails before streaming anything at all, that IS
+// a real failure (nothing to salvage) and must still surface as Error.
+func TestStreamCrashBeforeAnyContentIsStillAnError(t *testing.T) {
+	stub := &crashMidStreamStub{deltas: nil, errModelTier: "strong"}
+	h := streamHarnessWithBackend(t, stub)
+
+	resp := post(t, h.ts.URL+api.PathInfer, api.InferRequest{
+		Modality:  api.ModalityText,
+		TextInput: &api.TextInput{Messages: []api.ChatMessage{{Role: "user", Content: "hi"}}},
+		Stream:    true,
+	})
+	defer resp.Body.Close()
+
+	chunks := readSSEChunks(t, resp)
+	if len(chunks) != 1 {
+		t.Fatalf("want exactly 1 (terminal) chunk, got %d: %+v", len(chunks), chunks)
+	}
+	last := chunks[0]
+	if last.Truncated {
+		t.Error("Truncated = true with no content ever streamed; want false — this must surface as Error")
+	}
+	if last.Error != api.ErrCodeInternal {
+		t.Errorf("error = %q; want %q", last.Error, api.ErrCodeInternal)
 	}
 }
 

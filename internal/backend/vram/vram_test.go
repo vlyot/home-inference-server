@@ -28,6 +28,12 @@ func fastOpts() Options {
 		BufferPct:           10,
 		EvictionIdleTimeout: 100 * time.Millisecond,
 		EvictionInterval:    20 * time.Millisecond,
+		// Tests using a static MockVRAMProvider never satisfy
+		// waitForVRAMReclaim's condition, so without this every tier-switch
+		// test would pay the full production timeout (2s) — see
+		// TestSelectAndLoad_TierSwitchWaitsForVRAMReclaimBeforeReload for a
+		// test that deliberately exercises the real production duration.
+		VRAMReclaimMaxWait: 5 * time.Millisecond,
 	}
 }
 
@@ -1186,6 +1192,7 @@ type visionAwareStub struct {
 	lastVision  bool
 	visionCalls int
 	lastReq     backend.Request
+	onShutdown  func() // optional test hook, called after shutdowns is incremented
 }
 
 func (v *visionAwareStub) Modality() backend.ModalityKind { return backend.ModalityKindText }
@@ -1199,7 +1206,11 @@ func (v *visionAwareStub) Infer(_ context.Context, req backend.Request) (backend
 func (v *visionAwareStub) Shutdown(context.Context) error {
 	v.mu.Lock()
 	v.shutdowns++
+	hook := v.onShutdown
 	v.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	return nil
 }
 func (v *visionAwareStub) SetNextGPULayers(int) {}
@@ -1408,6 +1419,12 @@ func TestDescribe_RoutesThroughNormalSelectAndLoad(t *testing.T) {
 	if weak.lastRequest().SystemPrompt == "" {
 		t.Error("Describe's request should carry a non-empty SystemPrompt (regression guard for the refusal bug: an image with no system turn causes a small VLM to refuse)")
 	}
+	// Regression guard: 512 was observed cutting a real busy photo's
+	// description off mid-sentence, which then confused the reasoning model
+	// folding it into chat history.
+	if got := weak.lastRequest().MaxTokens; got < 1024 {
+		t.Errorf("Describe's MaxTokens = %d; want >= 1024 (512 was too low for a real photo's exhaustive description)", got)
+	}
 }
 
 func TestDescribe_PropagatesBackendError(t *testing.T) {
@@ -1421,5 +1438,188 @@ func TestDescribe_PropagatesBackendError(t *testing.T) {
 	be := &backend.BackendError{}
 	if !errors.As(err, &be) || be.Code != "overloaded" {
 		t.Fatalf("err = %v; want overloaded, got %v", be, err)
+	}
+}
+
+// Regression coverage for a real GPU crash: switching tiers immediately after
+// an eviction (no wait for the NVIDIA driver to actually reclaim the old
+// subprocess's VRAM/CUDA context) let a partially-CPU-offloaded reload
+// contend with the still-tearing-down old context and crash a few seconds
+// into generation. waitForVRAMReclaim closes that gap by polling
+// AvailableMB() for the freed amount before the next load proceeds.
+
+func TestWaitForVRAMReclaim_ReturnsAsSoonAsFreedAmountVisible(t *testing.T) {
+	mock := &MockVRAMProvider{FreeMB: 1000}
+	b := &Backend{vram: mock}
+
+	done := make(chan struct{})
+	go func() {
+		b.waitForVRAMReclaim(1000, 2000) // wants to see >= 1000+1500=2500
+		close(done)
+	}()
+
+	// Simulate the driver reclaiming VRAM ~150ms after eviction — well inside
+	// the poll loop's window but not instant.
+	time.Sleep(150 * time.Millisecond)
+	mock.SetFreeMB(2600)
+
+	select {
+	case <-done:
+	case <-time.After(vramReclaimMaxWait):
+		t.Fatal("waitForVRAMReclaim did not return after the reclaimed amount became visible")
+	}
+}
+
+func TestWaitForVRAMReclaim_GivesUpAfterMaxWaitIfNeverReclaimed(t *testing.T) {
+	mock := &MockVRAMProvider{FreeMB: 1000} // never rises
+	const maxWait = 50 * time.Millisecond
+	b := &Backend{vram: mock, opts: Options{VRAMReclaimMaxWait: maxWait}}
+
+	start := time.Now()
+	b.waitForVRAMReclaim(1000, 2000)
+	elapsed := time.Since(start)
+
+	if elapsed < maxWait {
+		t.Errorf("returned after %v; want >= opts.VRAMReclaimMaxWait (%v) since VRAM never rose", elapsed, maxWait)
+	}
+	if elapsed > maxWait+time.Second {
+		t.Errorf("returned after %v; want close to opts.VRAMReclaimMaxWait (%v), not much longer", elapsed, maxWait)
+	}
+}
+
+// TestWaitForVRAMReclaim_DefaultsToProductionConstantWhenOptsUnset is the one
+// deliberately slow test: it verifies the zero-value Options{} (as a real
+// caller would get without setting VRAMReclaimMaxWait) falls back to the
+// production 2s constant, not an unbounded or zero wait.
+func TestWaitForVRAMReclaim_DefaultsToProductionConstantWhenOptsUnset(t *testing.T) {
+	mock := &MockVRAMProvider{FreeMB: 1000} // never rises
+	b := &Backend{vram: mock}               // opts left zero-value
+
+	start := time.Now()
+	b.waitForVRAMReclaim(1000, 2000)
+	elapsed := time.Since(start)
+
+	if elapsed < vramReclaimMaxWait {
+		t.Errorf("returned after %v; want >= the production vramReclaimMaxWait constant (%v)", elapsed, vramReclaimMaxWait)
+	}
+	if elapsed > vramReclaimMaxWait+time.Second {
+		t.Errorf("returned after %v; want close to vramReclaimMaxWait (%v), not much longer", elapsed, vramReclaimMaxWait)
+	}
+}
+
+func TestWaitForVRAMReclaim_NoOpWhenNothingWasEvicted(t *testing.T) {
+	mock := &MockVRAMProvider{FreeMB: 1000}
+	b := &Backend{vram: mock}
+
+	start := time.Now()
+	b.waitForVRAMReclaim(1000, 0) // residentMB=0: nothing was evicted
+	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
+		t.Errorf("took %v for a no-op call (residentMB=0); want ~instant", elapsed)
+	}
+}
+
+func TestWaitForVRAMReclaim_ReturnsImmediatelyOnQueryError(t *testing.T) {
+	mock := &MockVRAMProvider{FreeMB: 1000, Err: errors.New("nvml unavailable")}
+	b := &Backend{vram: mock}
+
+	start := time.Now()
+	b.waitForVRAMReclaim(1000, 2000)
+	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
+		t.Errorf("took %v when AvailableMB errors; want immediate return rather than waiting out the full timeout", elapsed)
+	}
+}
+
+// TestSelectAndLoad_TierSwitchWaitsForVRAMReclaimBeforeReload exercises the
+// actual call site (not just the helper in isolation): switching from a
+// loaded tier to a different one must not proceed to the new load until
+// waitForVRAMReclaim's condition is satisfied (or its timeout elapses).
+// TestSelectAndLoad_ModeMismatchEvictsBeforeReadingVRAMForReselection guards a
+// real bug: when a loaded tier's mode doesn't match what the new request
+// needs (e.g. weak stayed resident in vision mode after a /v1/describe call,
+// and this request is plain text), selectAndLoad's reuse-check branch only
+// fires for a SAME-mode "does it still fit" recheck — a mode mismatch fell
+// through to the fresh availability read with the mismatched model still
+// fully resident, undercounting free VRAM. On real hardware this produced a
+// spurious 503 overloaded for a tier that would have fit fine once the old
+// load was actually gone.
+func TestSelectAndLoad_ModeMismatchEvictsBeforeReadingVRAMForReselection(t *testing.T) {
+	inners, weak := visionInners()
+
+	// mock starts with enough free VRAM for weak's vision-mode cold load
+	// (weight 1000 + KV 100*2+800=1000, ~2000 resident + 10% buffer).
+	mock := &MockVRAMProvider{FreeMB: 10000}
+
+	opts := fastOpts()
+	b := New(backend.ModalityKindText, visionRoster(), mock, inners, opts)
+	defer b.Shutdown(context.Background())
+
+	if _, _, err := b.Describe(context.Background(), []byte{1, 2, 3}); err != nil {
+		t.Fatalf("initial vision load: %v", err)
+	}
+	if !b.loadedVision {
+		t.Fatal("expected weak to be loaded in vision mode after Describe")
+	}
+
+	// Now free VRAM drops to a level too low even for strong's CPU-only
+	// fallback (its KV/compute overhead alone, at the default MaxParallel=1
+	// clamp, is KVCacheMB(300)*1+KVFixedMB(600)=900 MB, needing ~990 MB with
+	// the 10% buffer) — until weak's Shutdown actually runs (the real
+	// eviction completing), at which point it jumps back up. This simulates
+	// real NVML behaviour where a still-resident model's allocation is
+	// excluded from "free". If the bug regresses (reading VRAM before
+	// evicting the mode-mismatched load), selectAndLoad's tier-fit read
+	// happens before Shutdown fires and still sees the low value, spuriously
+	// failing even strong's CPU-only fallback.
+	mock.SetFreeMB(500)
+	weak.mu.Lock()
+	weak.onShutdown = func() { mock.SetFreeMB(10000) }
+	weak.mu.Unlock()
+
+	resp, err := b.Infer(context.Background(), backend.Request{PreferredTier: "strong"})
+	if err != nil {
+		t.Fatalf("unexpected error selecting strong after a vision-mode weak was loaded: %v", err)
+	}
+	if resp.ModelTier != string(types.TierStrong) {
+		t.Errorf("model_tier = %q; want strong", resp.ModelTier)
+	}
+	if b.loadedVision {
+		t.Error("loadedVision should be false after switching to a text-only strong-tier request")
+	}
+}
+
+func TestSelectAndLoad_TierSwitchWaitsForVRAMReclaimBeforeReload(t *testing.T) {
+	inners := stubInners(0)
+	mock := &MockVRAMProvider{FreeMB: 10000}
+	opts := fastOpts()
+	const maxWait = 80 * time.Millisecond
+	opts.VRAMReclaimMaxWait = maxWait // exercise the real bounded-wait behavior, just scaled down for a fast test
+	b := New(backend.ModalityKindText, testRoster(), mock, inners, opts)
+	defer b.Shutdown(context.Background())
+
+	// Load strong first (10000 MB free comfortably admits it).
+	if _, err := b.Infer(context.Background(), backend.Request{PreferredTier: "strong"}); err != nil {
+		t.Fatalf("initial strong load: %v", err)
+	}
+
+	// Now VRAM drops to a level that no longer fits strong but does fit weak,
+	// AND never rises back within the poll window — waitForVRAMReclaim must
+	// give up after its bounded timeout rather than hang the request forever.
+	mock.SetFreeMB(1200)
+
+	start := time.Now()
+	resp, err := b.Infer(context.Background(), backend.Request{PreferredTier: "weak"})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.ModelTier != string(types.TierWeak) {
+		t.Errorf("model_tier = %q; want weak", resp.ModelTier)
+	}
+	// Bounded: proceeds after opts.VRAMReclaimMaxWait, not stuck forever.
+	if elapsed < maxWait {
+		t.Errorf("tier switch returned after only %v; want it to have waited out VRAMReclaimMaxWait (%v) since VRAM never rose", elapsed, maxWait)
+	}
+	if elapsed > maxWait+time.Second {
+		t.Errorf("tier switch took %v; want close to VRAMReclaimMaxWait (%v)", elapsed, maxWait)
 	}
 }

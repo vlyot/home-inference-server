@@ -93,6 +93,54 @@ func (s *Server) handleInferStream(w http.ResponseWriter, r *http.Request, req a
 	queueWaitMS := startedAt.Sub(enqueuedAt).Milliseconds()
 	inferenceMS := finishedAt.Sub(startedAt).Milliseconds()
 
+	if err != nil && contentEmitted {
+		// The backend failed AFTER already streaming real content (observed on
+		// real hardware: the Gemma-4 subprocess can crash mid-generation from
+		// an unresolved upstream llama.cpp bug — see roadmap). Every prior
+		// Delta chunk the client received is genuine model output, not
+		// garbage from a failed request — discarding the whole turn (as the
+		// Error path does) would throw away a real, if incomplete, answer the
+		// user already saw stream in. Salvage it: end the stream as Truncated,
+		// not Error, so the client keeps what arrived instead of dropping it.
+		var be *backend.BackendError
+		errCode := api.ErrCodeInternal
+		if isBackendErr(err, &be) {
+			errCode = be.Code
+		}
+		slog.Info("job truncated (stream)",
+			slog.String(logschema.FieldEvent, string(logschema.EventJobFailed)),
+			slog.String(logschema.FieldCorrelationID, req.CorrelationID),
+			slog.String(logschema.FieldRequestID, backendReq.RequestID),
+			slog.String(logschema.FieldErrorCode, errCode),
+		)
+		s.recordJob(types.JobEntry{
+			RequestID:     backendReq.RequestID,
+			CorrelationID: req.CorrelationID,
+			Source:        types.JobSourceLocal,
+			Status:        types.JobStatusDone,
+			Modality:      string(req.Modality),
+			ModelTier:     resp.ModelTier,
+			Priority:      req.Priority,
+			MinTier:       req.MinTier,
+			EnqueuedAt:    enqueuedAt,
+			StartedAt:     startedAt,
+			FinishedAt:    finishedAt,
+			DurationMS:    durationMS,
+			QueueWaitMS:   queueWaitMS,
+			InferenceMS:   inferenceMS,
+		})
+		writeDone(api.StreamChunk{
+			RequestID:     backendReq.RequestID,
+			CorrelationID: req.CorrelationID,
+			DurationMS:    durationMS,
+			QueueWaitMS:   queueWaitMS,
+			InferenceMS:   inferenceMS,
+			ModelTier:     resp.ModelTier,
+			Truncated:     true,
+		})
+		return
+	}
+
 	if err != nil {
 		var be *backend.BackendError
 		errCode := api.ErrCodeInternal

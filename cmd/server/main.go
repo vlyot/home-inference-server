@@ -150,7 +150,11 @@ var rosterPorts = func() []int {
 
 func main() {
 	logBuf := logbuf.NewBuffer(5000, 24*time.Hour)
-	logger := slog.New(logBuf.Handler(slog.NewJSONHandler(os.Stdout, nil)))
+	logOpts := &slog.HandlerOptions{}
+	if os.Getenv("HIS_DEBUG_LOG") != "" {
+		logOpts.Level = slog.LevelDebug
+	}
+	logger := slog.New(logBuf.Handler(slog.NewJSONHandler(os.Stdout, logOpts)))
 	slog.SetDefault(logger)
 
 	var flagChatsDir string

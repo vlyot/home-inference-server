@@ -951,6 +951,21 @@ func TestSpawnArgsIncludeParallelAndContBatching(t *testing.T) {
 	}
 }
 
+// TestSpawnArgsDisableFlashAttn guards against a real GPU crash: llama-server's
+// default flash-attention setting ('auto', on for CUDA) silently kills the
+// subprocess a few seconds into generation under partial GPU/CPU layer
+// offload (a tight VRAM margin — e.g. a big tier reloading right after
+// evicting a smaller one). Reproduced repeatedly on real hardware; 0/10
+// failures once forced off. See spawnArgs' own comment for the full story.
+func TestSpawnArgsDisableFlashAttn(t *testing.T) {
+	p := newProcess("llama-server", `models\m.gguf`, "", "strong", 5, 8092, 2)
+	args := p.spawnArgs()
+
+	if !argsHave(args, "--flash-attn") || !argsHave(args, "off") {
+		t.Errorf("spawn args %v missing --flash-attn off", args)
+	}
+}
+
 func TestNewProcessClampsParallelToOne(t *testing.T) {
 	p := newProcess("llama-server", "m", "", "weak", -1, 8090, 0)
 	if p.parallel != 1 {

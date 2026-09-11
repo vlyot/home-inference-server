@@ -210,7 +210,12 @@ func (b *Backend) InferStream(ctx context.Context, req backend.Request, chunkFn 
 			resp, err = b.runCompleteStream(ctx, newURL, req, wrapped)
 		}
 		if err != nil {
-			return backend.Response{}, err
+			// Even on failure, carry ModelTier: a caller that already streamed
+			// real content before this error (e.g. the mid-generation crash
+			// server_stream.go salvages as Truncated) needs to know which
+			// tier produced it, for logging/job-history purposes.
+			resp.ModelTier = string(b.desc.TierLabel)
+			return resp, err
 		}
 	}
 
@@ -513,6 +518,18 @@ func (b *Backend) ensureRunning(ctx context.Context) (string, error) {
 				stopCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 				_ = proc.Stop(stopCtx)
 				cancel()
+				// Confirming the OS process exited isn't enough on its own: the
+				// NVIDIA driver releases a CUDA context's VRAM and tears it down
+				// asynchronously relative to process exit. Cheap defensive
+				// insurance mirroring vram.Backend's waitForVRAMReclaim (which
+				// polls real VRAM headroom via its VRAMProvider — not available
+				// at this layer, hence a short fixed pause instead). This did
+				// NOT turn out to be the cause of the specific crash that
+				// prompted it — see waitForVRAMReclaim's doc comment and the
+				// roadmap entry for the actual root cause (--flash-attn) — but
+				// it is genuine, community-documented behaviour worth guarding
+				// against regardless.
+				time.Sleep(300 * time.Millisecond)
 			}
 			b.mu.Lock()
 			b.ready = false

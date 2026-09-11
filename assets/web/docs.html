@@ -619,7 +619,12 @@ The client just parses <code>output</code> as JSON.</p>
     <tr>
       <td class="field-name">error</td>
       <td class="field-type">string</td>
-      <td class="field-desc">Set on the final <code>done=true</code> chunk when inference failed mid-stream (e.g. <code>"overloaded"</code>, <code>"timeout"</code>, <code>"unavailable"</code>); <code>"internal_error"</code> when the backend returned no error but produced zero content and zero reasoning; or <code>"reasoning_exhausted"</code> when a reasoning-capable model spent its entire <code>max_tokens</code> budget on <code>reasoning</code> chunks and never produced a <code>delta</code> chunk. One of the <a href="#error-codes">error codes</a>; <code>delta</code> and the summary fields are empty in that case. Omitted on success.</td>
+      <td class="field-desc">Set on the final <code>done=true</code> chunk when inference failed mid-stream <em>before any content was delivered</em> (e.g. <code>"overloaded"</code>, <code>"timeout"</code>, <code>"unavailable"</code>); <code>"internal_error"</code> when the backend returned no error but produced zero content and zero reasoning; or <code>"reasoning_exhausted"</code> when a reasoning-capable model spent its entire <code>max_tokens</code> budget on <code>reasoning</code> chunks and never produced a <code>delta</code> chunk. One of the <a href="#error-codes">error codes</a>; <code>delta</code> and the summary fields are empty in that case. Mutually exclusive with <code>truncated</code>. Omitted on success.</td>
+    </tr>
+    <tr>
+      <td class="field-name">truncated</td>
+      <td class="field-type">boolean</td>
+      <td class="field-desc">Set on the final <code>done=true</code> chunk when the backend failed <em>after</em> already delivering real <code>delta</code> content (e.g. the model subprocess crashed partway through a long generation). This is not a failure — every prior <code>delta</code> chunk is genuine model output; treat it like a normal successful completion, just cut short, rather than discarding what streamed. Summary fields (<code>duration_ms</code>, <code>model_tier</code>, etc.) are populated on a best-effort basis. Mutually exclusive with <code>error</code>. Omitted otherwise.</td>
     </tr>
   </tbody>
 </table>
@@ -803,7 +808,8 @@ data: {"request_id":"...","correlation_id":"...","delta":"","done":true,"tokens_
 data: [DONE]</code></pre>
 
 <p>The stream ends with a literal <code>data: [DONE]</code> line after the final chunk.</p>
-<p>If inference fails mid-stream, the final chunk instead carries an <code>error</code> field (e.g. <code>{"...","done":true,"error":"overloaded"}</code>) with no summary fields, followed by <code>data: [DONE]</code>. Check <code>chunk.error</code> before treating a <code>done</code> chunk as success. A completion that returns no backend error but yields zero content and zero reasoning also terminates with <code>"error":"internal_error"</code> rather than an empty success chunk — a bare <code>done</code> chunk with no <code>error</code> always means at least one <code>delta</code> chunk was produced.</p>
+<p>If inference fails mid-stream <em>before any content was produced</em>, the final chunk instead carries an <code>error</code> field (e.g. <code>{"...","done":true,"error":"overloaded"}</code>) with no summary fields, followed by <code>data: [DONE]</code>. Check <code>chunk.error</code> before treating a <code>done</code> chunk as success. A completion that returns no backend error but yields zero content and zero reasoning also terminates with <code>"error":"internal_error"</code> rather than an empty success chunk — a bare <code>done</code> chunk with no <code>error</code> and no <code>truncated</code> always means at least one <code>delta</code> chunk was produced.</p>
+<p>If inference fails mid-stream <em>after</em> some content was already delivered (e.g. the model process died partway through a long generation), the final chunk instead carries <code>"truncated": true</code> — not <code>error</code>. This is deliberately not treated as a failure: every prior <code>delta</code> chunk is genuine model output, and a client should keep it (the built-in Chat UI appends a small "response cut short" note rather than discarding the turn). Only a chunk with neither <code>error</code> nor <code>truncated</code> set is a fully complete response.</p>
 
 <h3>Reasoning models</h3>
 <p>A reasoning-capable model (e.g. Gemma's "thinking" mode) streams its chain-of-thought under a separate <code>reasoning</code> field on each chunk, never mixed into <code>delta</code>:</p>

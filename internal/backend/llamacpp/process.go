@@ -89,6 +89,19 @@ func (p *process) spawnArgs() []string {
 		"--parallel", strconv.Itoa(p.parallel),
 		"--cont-batching",
 		"--no-mmap",
+		// --flash-attn off: llama-server's default ('auto', flash attention on
+		// for CUDA) silently crashes the subprocess a few seconds into
+		// generation — no CUDA error, no log line, the process just
+		// disappears — specifically under a tight VRAM margin that forces
+		// partial GPU/CPU layer offload (e.g. a large tier reloading right
+		// after evicting a smaller one leaves too little free VRAM for a full
+		// GPU load). Reproduced on real hardware at ~30% failure rate with
+		// flash attention on 'auto'; 0/10 failures across two batches with it
+		// forced off. Matches a known community pattern for Gemma-family
+		// models under partial CUDA offload (e.g. ggml-org/llama.cpp#21401,
+		// #22483) — flash attention is the first thing to disable when a
+		// partially-offloaded llama-server crashes silently mid-generation.
+		"--flash-attn", "off",
 	}
 	if p.mmprojPath != "" {
 		args = append(args, "--mmproj", p.mmprojPath)
