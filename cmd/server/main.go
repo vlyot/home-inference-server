@@ -82,16 +82,20 @@ const llamaExe = `C:\llama\llama-server.exe`
 var defaultRoster = []types.ModelDescriptor{
 	{
 		TierLabel:      types.TierWeak,
-		Name:           "smolvlm2-500m-q8_0",
-		FilePath:       `models\smolvlm2-500m-q8_0.gguf`,
-		MMProjPath:     `models\smolvlm2-500m-mmproj-q8_0.gguf`,
-		RequiredVRAMMB: 437,
+		Name:           "smolvlm2-2.2b-q4_k_m",
+		FilePath:       `models\smolvlm2-2.2b-q4_k_m.gguf`,
+		MMProjPath:     `models\smolvlm2-2.2b-mmproj-q8_0.gguf`,
+		RequiredVRAMMB: 1061, // Q4_K_M text weights, measured file size
 		Modality:       "vision",
-		TotalLayers:    32,
-		// KV bumped from 150/100 to cover the CLIP vision encoder loaded via
-		// --mmproj. Conservative until measured from llama-server startup logs.
-		KVCacheMB: 180,
-		KVFixedMB: 260,
+		TotalLayers:    24, // llama.block_count from the GGUF metadata
+		// Measured on the GPU: nvidia-smi showed ~2512 MB resident during a
+		// --mmproj load (weights 1061 + mmproj/KV/compute-buffer overhead
+		// ~1451, vs. the earlier 500M-tier's 260 MB overhead — the Q8_0 mmproj
+		// itself is 565 MB and rides on GPU alongside the text weights).
+		// KVFixedMB carries the non-scaling remainder; --parallel is 1 for
+		// this tier so KVCacheMB's per-slot scaling doesn't matter here yet.
+		KVCacheMB: 220,
+		KVFixedMB: 1231,
 		Port:      8094,
 	},
 	{

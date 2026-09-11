@@ -1051,8 +1051,8 @@ There is no local defer queue and no local drain loop.</p>
     </tr>
     <tr>
       <td><span class="badge badge-normal">weak</span></td>
-      <td class="field-name">smolvlm2-500m-q8_0</td>
-      <td>437 MB + mmproj</td>
+      <td class="field-name">smolvlm2-2.2b-q4_k_m</td>
+      <td>~1.6 GB (1.06 GB Q4_K_M text + 0.55 GB Q8_0 mmproj)</td>
       <td>vision</td>
       <td class="field-desc">The perception model for <code>modality: "vision"</code>. Runs with its own vision projector (<code>--mmproj</code>) on its own subprocess; produces a literal image description that a text tier then reasons over. Never resident at the same time as a text tier — see <a href="#vision-pipeline">How vision works</a>.</td>
     </tr>

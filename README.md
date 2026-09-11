@@ -87,7 +87,7 @@ the `/v1/infer` contract.
 | **Strong** | Gemma 4 E4B Q4_K_M         | ~4.7 GB | text     | Primary under normal conditions               |
 | **Mid**    | Gemma 4 E2B Q4_K_M         | ~3.0 GB | text     | Moderate-pressure fallback (same family)      |
 | **Weak**   | Qwen2.5-3B-Instruct Q4_K_M | ~1.9 GB | text     | Extreme-pressure last resort before deferral  |
-| **Weak**   | SmolVLM2 500M Q8_0         | ~437 MB | vision   | Vision requests (pluggable; separate backend) |
+| **Weak**   | SmolVLM2 2.2B Q4_K_M       | ~1.6 GB | vision   | Vision perception model (SmolVLM2 → Gemma pipeline) |
 
 These were picked for bang for buck on my 8 GB card — the most capable model at
 each size that still leaves room to run. Weight sizes aren't hard VRAM
@@ -114,7 +114,8 @@ Real inference needs:
 - `nvml.dll` in `System32` (ships with the NVIDIA driver)
 - The GGUF model files in `models\`:
   `gemma-4-e4b-q4_k_m.gguf`, `gemma-4-e2b-q4_k_m.gguf`,
-  `qwen2.5-3b-instruct-q4_k_m.gguf`, `smolvlm2-500m-q8_0.gguf`
+  `qwen2.5-3b-instruct-q4_k_m.gguf`, `smolvlm2-2.2b-q4_k_m.gguf` +
+  `smolvlm2-2.2b-mmproj-q8_0.gguf` (vision)
 
 From another terminal:
 
