@@ -10,13 +10,24 @@ const defaultTotalLayers = 32
 // ScaledKVOverheadMB is the non-weight VRAM a load of d occupies when
 // llama-server runs with `slots` concurrent contexts (--parallel N): the
 // per-slot KV cache multiplied by the slot count, plus the fixed compute/CUDA
-// overhead. slots < 1 is treated as 1. Exported so llamacpp can size its own
+// overhead. slots < 1 is treated as 1. needsVision selects d's vision-mode
+// constants (the mmproj's own GPU-resident cost lives in VisionKVFixedMB) when
+// true and d.HasVision(); otherwise the text-mode constants are used — a
+// needsVision=true call against a tier with no vision variant falls back to
+// text-mode (KVParts), since that combination should never actually be reached
+// by a caller (vram.Backend restricts vision requests to HasVision() tiers
+// before this is ever called). Exported so llamacpp can size its own
 // resident-VRAM estimate the same way the fit/eviction math does.
-func ScaledKVOverheadMB(d types.ModelDescriptor, slots int) int64 {
+func ScaledKVOverheadMB(d types.ModelDescriptor, slots int, needsVision bool) int64 {
 	if slots < 1 {
 		slots = 1
 	}
-	cache, fixed := d.KVParts()
+	var cache, fixed int64
+	if needsVision && d.HasVision() {
+		cache, fixed = d.VisionKVParts()
+	} else {
+		cache, fixed = d.KVParts()
+	}
 	return cache*int64(slots) + fixed
 }
 

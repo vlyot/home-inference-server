@@ -74,6 +74,7 @@ func (b *Backend) runEviction(ctx context.Context) {
 			idleFor := time.Since(b.lastUsed)
 			loaded := b.loadedTier
 			loadedLayers := b.loadedLayers
+			loadedVision := b.loadedVision
 
 			if idleFor >= b.opts.EvictionIdleTimeout {
 				toStop := b.evictLocked()
@@ -102,9 +103,9 @@ func (b *Backend) runEviction(ctx context.Context) {
 			// Without (1) a healthy loaded model looks starved on every tick
 			// (NVML free VRAM already excludes its allocation), producing an
 			// endless load/evict/reload storm.
-			headroomFits := effectiveHeadroomFits(loaded, loadedLayers, b.opts.MaxParallel, avail, b.opts.BufferPct)
+			headroomFits := effectiveHeadroomFits(loaded, loadedLayers, loadedVision, b.opts.MaxParallel, avail, b.opts.BufferPct)
 			if !headroomFits && avail < externalPressureFloorMB {
-				resident := GPUResidentMB(loaded.RequiredVRAMMB, ScaledKVOverheadMB(*loaded, b.opts.MaxParallel), loadedLayers, loaded.TotalLayers)
+				resident := GPUResidentMB(loaded.WeightMB(loadedVision), ScaledKVOverheadMB(*loaded, b.opts.MaxParallel, loadedVision), loadedLayers, loaded.TotalLayers)
 				slog.Warn("vram pressure detected",
 					slog.String(logschema.FieldEvent, string(logschema.EventVRAMPressure)),
 					slog.Int64(logschema.FieldVRAMAvailMB, avail),

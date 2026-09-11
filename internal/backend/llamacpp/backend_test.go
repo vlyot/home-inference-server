@@ -826,6 +826,67 @@ func TestEnsureRunning_StaleReadyReloadsRatherThanTrustingDeadProc(t *testing.T)
 	}
 }
 
+// TestEnsureRunning_SpawnsWithMMProjWhenNeedsVisionSet covers the fast path
+// where the subprocess is already running in the mode a request needs: no
+// mismatch, no respawn, the request just proceeds. (The actual --mmproj
+// spawn-arg construction is covered by TestSpawnArgsIncludeMMProjWhenSet;
+// exercising a real cold spawn end-to-end needs a real llama-server binary,
+// which unit tests don't have.)
+func TestEnsureRunning_SpawnsWithMMProjWhenNeedsVisionSet(t *testing.T) {
+	srv, st := chatStub(t)
+	b := makeTestBackend(srv.URL)
+	b.desc.MMProjPath = "mmproj.gguf"
+	b.runningWithVision = true // already running in vision mode
+
+	b.SetNextNeedsVision(true) // request wants vision mode too — no mismatch
+	if _, err := b.Infer(context.Background(), backend.Request{
+		Messages:  []backend.Message{{Role: "user", Content: "hi"}},
+		ImageData: []byte{1},
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if st.chatHits != 1 {
+		t.Fatalf("chatHits = %d; want 1", st.chatHits)
+	}
+}
+
+func TestEnsureRunning_ModeMismatchClearsReadyAndStopsProcess(t *testing.T) {
+	srv := stubServer(t, okHandler("unused", 0))
+	defer srv.Close()
+
+	b := makeTestBackend(srv.URL)
+	b.proc = &process{} // non-nil handle so the mismatch path calls Stop on it
+	b.runningWithVision = false
+	b.exe = "llama-server-does-not-exist" // the respawn attempt fails; we only assert the mismatch side-effects
+
+	b.SetNextNeedsVision(true)
+	_, err := b.ensureRunning(context.Background())
+	if err == nil {
+		t.Fatal("expected an error from the doomed respawn attempt")
+	}
+
+	b.mu.Lock()
+	stillReady, stillProc := b.ready, b.proc
+	b.mu.Unlock()
+	if stillReady || stillProc != nil {
+		t.Errorf("mode-mismatch path did not clear ready/proc: ready=%v proc=%v", stillReady, stillProc)
+	}
+}
+
+func TestEnsureRunning_SameModeReusesWithoutMismatchPath(t *testing.T) {
+	b := makeTestBackend("http://127.0.0.1:0")
+	b.runningWithVision = true
+	b.SetNextNeedsVision(true)
+
+	url, err := b.ensureRunning(context.Background())
+	if err != nil {
+		t.Fatalf("ensureRunning errored: %v", err)
+	}
+	if url != "http://127.0.0.1:0" {
+		t.Errorf("url = %q; want the preset base URL (fast path, no mismatch)", url)
+	}
+}
+
 // --- --parallel spawn args + per-request tok/sec normalisation ---
 
 func argsHave(args []string, want string) bool {

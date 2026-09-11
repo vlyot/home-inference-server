@@ -140,13 +140,13 @@ func TestFitLayers_TotalLayersFallback(t *testing.T) {
 
 func TestScaledKVOverheadMB_ScalesCacheNotFixed(t *testing.T) {
 	d := types.ModelDescriptor{KVCacheMB: 500, KVFixedMB: 300}
-	if got := ScaledKVOverheadMB(d, 1); got != 800 {
+	if got := ScaledKVOverheadMB(d, 1, false); got != 800 {
 		t.Errorf("slots=1: got %d; want 800", got)
 	}
-	if got := ScaledKVOverheadMB(d, 2); got != 1300 {
+	if got := ScaledKVOverheadMB(d, 2, false); got != 1300 {
 		t.Errorf("slots=2: got %d; want 1300 (2*500 + 300)", got)
 	}
-	if got := ScaledKVOverheadMB(d, 0); got != 800 {
+	if got := ScaledKVOverheadMB(d, 0, false); got != 800 {
 		t.Errorf("slots=0 clamps to 1: got %d; want 800", got)
 	}
 }
@@ -157,7 +157,7 @@ func TestKVParts_FallbackWhenOnlyOverheadSet(t *testing.T) {
 	if cache != 700 || fixed != 0 {
 		t.Errorf("KVParts() = (%d, %d); want (700, 0)", cache, fixed)
 	}
-	if got := ScaledKVOverheadMB(d, 3); got != 2100 {
+	if got := ScaledKVOverheadMB(d, 3, false); got != 2100 {
 		t.Errorf("slots=3 with legacy overhead: got %d; want 2100", got)
 	}
 }
@@ -165,14 +165,52 @@ func TestKVParts_FallbackWhenOnlyOverheadSet(t *testing.T) {
 func TestFitLayers_TighterWithMoreSlots(t *testing.T) {
 	// weight 3000, per-slot cache 600, fixed 300, 12000 MB free, 10% buffer.
 	// slots=1: overhead 900, budget = 12000/1.1 - 900 ≈ 9909 >= 3000 → -1 (full).
-	one := FitLayers(3000, ScaledKVOverheadMB(types.ModelDescriptor{KVCacheMB: 600, KVFixedMB: 300}, 1), 4200, 32, 10)
+	one := FitLayers(3000, ScaledKVOverheadMB(types.ModelDescriptor{KVCacheMB: 600, KVFixedMB: 300}, 1, false), 4200, 32, 10)
 	// slots=1 with only 4200 free: budget = 4200/1.1 - 900 ≈ 2918 < 3000 → partial.
 	if one == 0 || one == -1 {
 		t.Fatalf("slots=1: got %d; want a partial split", one)
 	}
-	two := FitLayers(3000, ScaledKVOverheadMB(types.ModelDescriptor{KVCacheMB: 600, KVFixedMB: 300}, 2), 4200, 32, 10)
+	two := FitLayers(3000, ScaledKVOverheadMB(types.ModelDescriptor{KVCacheMB: 600, KVFixedMB: 300}, 2, false), 4200, 32, 10)
 	// slots=2: overhead 1500, budget = 4200/1.1 - 1500 ≈ 2318 → fewer layers than slots=1.
 	if two >= one {
 		t.Errorf("slots=2 (%d layers) should fit fewer than slots=1 (%d layers)", two, one)
+	}
+}
+
+func TestScaledKVOverheadMB_VisionMode_UsesVisionConstants(t *testing.T) {
+	d := types.ModelDescriptor{
+		MMProjPath: "mmproj.gguf",
+		KVCacheMB:  500, KVFixedMB: 300,
+		VisionKVCacheMB: 900, VisionKVFixedMB: 1200,
+	}
+	if got := ScaledKVOverheadMB(d, 1, true); got != 2100 {
+		t.Errorf("vision slots=1: got %d; want 2100 (900+1200)", got)
+	}
+	if got := ScaledKVOverheadMB(d, 1, false); got != 800 {
+		t.Errorf("text slots=1: got %d; want 800 (unaffected by vision fields)", got)
+	}
+}
+
+func TestScaledKVOverheadMB_VisionModeOnNonVisionTier_FallsBackToText(t *testing.T) {
+	d := types.ModelDescriptor{KVCacheMB: 500, KVFixedMB: 300, VisionKVCacheMB: 900, VisionKVFixedMB: 1200}
+	if got := ScaledKVOverheadMB(d, 1, true); got != 800 {
+		t.Errorf("needsVision on a non-HasVision() tier: got %d; want 800 (text fallback)", got)
+	}
+}
+
+func TestWeightMB_PicksVisionOrTextWeight(t *testing.T) {
+	d := types.ModelDescriptor{MMProjPath: "mmproj.gguf", RequiredVRAMMB: 1000, VisionRequiredVRAMMB: 1900}
+	if got := d.WeightMB(false); got != 1000 {
+		t.Errorf("text: got %d; want 1000", got)
+	}
+	if got := d.WeightMB(true); got != 1900 {
+		t.Errorf("vision: got %d; want 1900", got)
+	}
+}
+
+func TestWeightMB_VisionOnNonVisionTier_FallsBackToText(t *testing.T) {
+	d := types.ModelDescriptor{RequiredVRAMMB: 1000, VisionRequiredVRAMMB: 1900}
+	if got := d.WeightMB(true); got != 1000 {
+		t.Errorf("got %d; want 1000 (no MMProjPath, so HasVision() is false)", got)
 	}
 }

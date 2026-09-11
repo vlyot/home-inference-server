@@ -48,9 +48,12 @@ func newMultiModalHarness(t *testing.T, latency time.Duration) *harness {
 	})
 }
 
-// fakeVisionBackend stands in for the SmolVLM2→Gemma pipeline in server tests.
-// It returns a canned 200 response, or a degraded one when degraded is set, or
-// an error when inferErr is set. recordedReq captures the last request seen.
+// fakeVisionBackend stands in for whatever backend.Backend is registered under
+// ModalityKindVision (in production, the same vram.Backend instance text uses)
+// so these tests exercise only the server layer's routing/translation, not
+// real tier selection. It returns a canned 200 response, or a degraded one
+// when degraded is set, or an error when inferErr is set. recordedReq captures
+// the last request seen.
 type fakeVisionBackend struct {
 	output      string
 	degraded    bool
@@ -252,7 +255,7 @@ func TestConcurrentRequests(t *testing.T) {
 	}
 }
 
-func TestVisionInfer_RunsPipelineAndReturnsOutput(t *testing.T) {
+func TestVisionInfer_ReturnsOutput(t *testing.T) {
 	h := newMultiModalHarness(t, 0)
 	imgData := base64.StdEncoding.EncodeToString([]byte("fake-image-bytes"))
 	resp := post(t, h.ts.URL+api.PathInfer, api.InferRequest{
@@ -298,7 +301,7 @@ func TestVisionInfer_ImageURLReturns400(t *testing.T) {
 	}
 }
 
-func TestVisionInfer_QualityDegradedHeaderWhenPipelineDegrades(t *testing.T) {
+func TestVisionInfer_QualityDegradedHeaderWhenBackendDegrades(t *testing.T) {
 	h := newHarnessWithBackends(t, map[backend.ModalityKind]backend.Backend{
 		backend.ModalityKindText:   stub.New(backend.ModalityKindText, 0),
 		backend.ModalityKindVision: &fakeVisionBackend{output: "raw description", degraded: true},

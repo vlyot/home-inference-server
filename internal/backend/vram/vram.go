@@ -96,7 +96,8 @@ type Backend struct {
 	mu           sync.Mutex
 	loadedTier   *types.ModelDescriptor
 	loadedAt     time.Time
-	loadedLayers int // --n-gpu-layers chosen for the loaded tier (-1 full, 0 CPU)
+	loadedLayers int  // --n-gpu-layers chosen for the loaded tier (-1 full, 0 CPU)
+	loadedVision bool // true iff the loaded tier's subprocess was spawned WITH --mmproj
 	lastUsed     time.Time
 	// inflight tracks how many Infer calls are active, so eviction can skip
 	// while requests are in-flight.
@@ -142,6 +143,39 @@ func New(
 func (b *Backend) Modality() backend.ModalityKind { return b.modality }
 
 func (b *Backend) Ready() bool { return true }
+
+// describePrompt asks the loaded vision-capable tier for a literal, exhaustive
+// description. Measured on the GPU: an open-ended "list everything in this
+// image" / "describe this image" phrasing reliably makes Qwen2.5-VL-3B-Instruct
+// (Q4_K_M) refuse with "I cannot see images" even though it correctly answers
+// specific questions about the same image — a known small-VLM failure mode
+// where a broad description request pattern-matches text-only training data.
+// Explicitly asserting "you can see this image clearly" up front reliably
+// avoids the refusal; verified across repeated runs and multiple images.
+const describePrompt = `You can see this image clearly. Describe it factually: ` +
+	`its dominant colours, every object and where it is, any visible text or ` +
+	`numbers exactly as written, people and what they are doing, and the ` +
+	`overall composition. Be specific and exhaustive, not interpretive.`
+
+// describeMaxTokens caps a Describe call's output.
+const describeMaxTokens = 512
+
+// Describe runs a one-shot vision request asking the loaded vision-capable
+// tier for a literal description of imageData, going through the normal
+// Infer path — so it is subject to the same tier-selection, speed-floor, and
+// eviction machinery as any other vision request. Implements
+// server.Describer.
+func (b *Backend) Describe(ctx context.Context, imageData []byte) (description, modelTier string, err error) {
+	resp, err := b.Infer(ctx, backend.Request{
+		Prompt:    describePrompt,
+		ImageData: imageData,
+		MaxTokens: describeMaxTokens,
+	})
+	if err != nil {
+		return "", "", err
+	}
+	return resp.Output, resp.ModelTier, nil
+}
 
 // Infer selects the best-fit model tier, loads it if needed, detects
 // contention, and runs inference. Concurrent calls are bounded to
@@ -301,7 +335,14 @@ func (b *Backend) InferStream(ctx context.Context, req backend.Request, chunkFn 
 // initialForced, when non-nil, seeds the first selectAndLoad with a specific
 // tier (the OOM cascade in Infer uses it to retry on the next-smaller tier). A
 // PreferredTier pin takes precedence over it.
+//
+// When req.ImageData is set, selection is restricted to tiers with
+// d.HasVision() — a PreferredTier pin to a non-vision tier is rejected up
+// front (400); an automatic selection that finds no vision-capable tier
+// fitting falls through to selectAndLoad's own "overloaded" error.
 func (b *Backend) selectInner(ctx context.Context, req backend.Request, initialForced *types.ModelDescriptor) (*types.ModelDescriptor, backend.Backend, error) {
+	needsVision := len(req.ImageData) > 0
+
 	var pinned *types.ModelDescriptor
 	if req.PreferredTier != "" {
 		desc, ok := b.tierByLabel(types.ModelTierLabel(req.PreferredTier))
@@ -309,6 +350,12 @@ func (b *Backend) selectInner(ctx context.Context, req backend.Request, initialF
 			return nil, nil, &backend.BackendError{
 				Code:    "invalid_request",
 				Message: fmt.Sprintf("preferred_tier %q is not in the model roster", req.PreferredTier),
+			}
+		}
+		if needsVision && !desc.HasVision() {
+			return nil, nil, &backend.BackendError{
+				Code:    "invalid_request",
+				Message: fmt.Sprintf("preferred_tier %q has no vision support", req.PreferredTier),
 			}
 		}
 		pinned = desc
@@ -324,7 +371,7 @@ func (b *Backend) selectInner(ctx context.Context, req backend.Request, initialF
 	}
 
 	for attempt := 0; attempt < len(b.roster); attempt++ {
-		desc, err := b.selectAndLoad(ctx, forced)
+		desc, err := b.selectAndLoad(ctx, forced, needsVision)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -335,7 +382,7 @@ func (b *Backend) selectInner(ctx context.Context, req backend.Request, initialF
 			}
 		}
 
-		b.detectContention(desc)
+		b.detectContention(desc, needsVision)
 
 		inner, ok := b.inners[desc.TierLabel]
 		if !ok {
@@ -360,6 +407,11 @@ func (b *Backend) selectInner(ctx context.Context, req backend.Request, initialF
 		}
 
 		next := b.tierBelow(desc.TierLabel)
+		if needsVision {
+			for next != nil && !next.HasVision() {
+				next = b.tierBelow(next.TierLabel)
+			}
+		}
 		belowMin := req.MinTier != "" && next != nil &&
 			tierRank(next.TierLabel) < tierRank(types.ModelTierLabel(req.MinTier))
 		if next == nil || belowMin {
@@ -385,7 +437,7 @@ func (b *Backend) selectInner(ctx context.Context, req backend.Request, initialF
 
 	// Roster exhausted (should be unreachable — the loop returns on the last
 	// tier). Fall back to a plain selection.
-	desc, err := b.selectAndLoad(ctx, forced)
+	desc, err := b.selectAndLoad(ctx, forced, needsVision)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -439,6 +491,7 @@ func (b *Backend) Shutdown(ctx context.Context) error {
 	b.mu.Lock()
 	b.loadedTier = nil
 	b.loadedLayers = 0
+	b.loadedVision = false
 	b.loadedAt = time.Time{}
 	b.mu.Unlock()
 
@@ -457,7 +510,14 @@ func (b *Backend) Shutdown(ctx context.Context) error {
 // even a CPU-only load (weights in system RAM) won't fit its KV/compute buffer.
 // A non-nil forced (from a PreferredTier pin, the OOM cascade, or the speed-floor
 // cascade in selectInner) pins the choice to that tier.
-func (b *Backend) selectAndLoad(ctx context.Context, forced *types.ModelDescriptor) (*types.ModelDescriptor, error) {
+//
+// needsVision restricts candidate tiers to d.HasVision() ones and sizes every
+// fit/eviction check against the tier's vision-mode constants. It is also part
+// of the "is the currently loaded tier still usable" identity: a tier already
+// loaded in the WRONG mode (text when vision is needed, or vice versa) is
+// evicted and reloaded even though its TierLabel is unchanged — the running
+// subprocess must be respawned with (or without) --mmproj to match.
+func (b *Backend) selectAndLoad(ctx context.Context, forced *types.ModelDescriptor, needsVision bool) (*types.ModelDescriptor, error) {
 	// Serialise the whole select-and-load decision: with MaxParallel > 1 two
 	// concurrent requests could otherwise both observe "nothing loaded", both
 	// evict, and both spawn a subprocess. The common case (a warm model that
@@ -466,12 +526,13 @@ func (b *Backend) selectAndLoad(ctx context.Context, forced *types.ModelDescript
 	b.loadMu.Lock()
 	defer b.loadMu.Unlock()
 
-	// If a model is already loaded (and no cascade is forcing a different tier),
-	// check if it can still be reused. NVML free VRAM excludes the loaded model's
-	// own allocation, so add its GPU-resident footprint back to get "effective
-	// headroom" — what VRAM would look like if we reloaded right now.
+	// If a model is already loaded in the matching mode (and no cascade is
+	// forcing a different tier), check if it can still be reused. NVML free
+	// VRAM excludes the loaded model's own allocation, so add its GPU-resident
+	// footprint back to get "effective headroom" — what VRAM would look like if
+	// we reloaded right now.
 	b.mu.Lock()
-	if b.loadedTier != nil && (forced == nil || forced.TierLabel == b.loadedTier.TierLabel) {
+	if b.loadedTier != nil && b.loadedVision == needsVision && (forced == nil || forced.TierLabel == b.loadedTier.TierLabel) {
 		loaded := b.loadedTier
 		loadedLayers := b.loadedLayers
 		b.mu.Unlock()
@@ -486,7 +547,7 @@ func (b *Backend) selectAndLoad(ctx context.Context, forced *types.ModelDescript
 			b.mu.Unlock()
 			return loaded, nil
 		}
-		if effectiveHeadroomFits(loaded, loadedLayers, b.opts.MaxParallel, availRaw, b.opts.BufferPct) {
+		if effectiveHeadroomFits(loaded, loadedLayers, needsVision, b.opts.MaxParallel, availRaw, b.opts.BufferPct) {
 			b.mu.Lock()
 			b.lastUsed = time.Now()
 			b.mu.Unlock()
@@ -519,6 +580,9 @@ func (b *Backend) selectAndLoad(ctx context.Context, forced *types.ModelDescript
 	var chosen *types.ModelDescriptor
 	var chosenLayers int
 	matches := func(d types.ModelDescriptor) bool {
+		if needsVision && !d.HasVision() {
+			return false
+		}
 		return forced == nil || d.TierLabel == forced.TierLabel
 	}
 
@@ -538,7 +602,7 @@ func (b *Backend) selectAndLoad(ctx context.Context, forced *types.ModelDescript
 			if !matches(d) {
 				continue
 			}
-			layers := FitLayers(d.RequiredVRAMMB, ScaledKVOverheadMB(d, b.opts.MaxParallel), availRaw, d.TotalLayers, b.opts.BufferPct)
+			layers := FitLayers(d.WeightMB(needsVision), ScaledKVOverheadMB(d, b.opts.MaxParallel, needsVision), availRaw, d.TotalLayers, b.opts.BufferPct)
 			if layers != 0 {
 				chosen, chosenLayers = &b.roster[i], layers
 			}
@@ -550,7 +614,7 @@ func (b *Backend) selectAndLoad(ctx context.Context, forced *types.ModelDescript
 			if !matches(d) {
 				continue
 			}
-			if fitsWithBuffer(ScaledKVOverheadMB(d, b.opts.MaxParallel), availRaw, b.opts.BufferPct) {
+			if fitsWithBuffer(ScaledKVOverheadMB(d, b.opts.MaxParallel, needsVision), availRaw, b.opts.BufferPct) {
 				chosen, chosenLayers = &b.roster[i], 0
 			}
 		}
@@ -563,7 +627,7 @@ func (b *Backend) selectAndLoad(ctx context.Context, forced *types.ModelDescript
 	}
 
 	b.mu.Lock()
-	if b.loadedTier != nil && b.loadedTier.TierLabel == chosen.TierLabel {
+	if b.loadedTier != nil && b.loadedTier.TierLabel == chosen.TierLabel && b.loadedVision == needsVision {
 		b.lastUsed = time.Now()
 		b.mu.Unlock()
 		return b.loadedTier, nil
@@ -576,11 +640,14 @@ func (b *Backend) selectAndLoad(ctx context.Context, forced *types.ModelDescript
 	chosenIdx := b.rosterIndex(chosen.TierLabel)
 	for idx := chosenIdx; idx >= 0; idx-- {
 		d := &b.roster[idx]
+		if !matches(*d) {
+			break // vision requests never cascade below the last vision-capable tier
+		}
 		layers := chosenLayers
 		if idx != chosenIdx && !unlimited {
-			layers = FitLayers(d.RequiredVRAMMB, ScaledKVOverheadMB(*d, b.opts.MaxParallel), availRaw, d.TotalLayers, b.opts.BufferPct)
+			layers = FitLayers(d.WeightMB(needsVision), ScaledKVOverheadMB(*d, b.opts.MaxParallel, needsVision), availRaw, d.TotalLayers, b.opts.BufferPct)
 		}
-		loadErr := b.loadModel(d, layers)
+		loadErr := b.loadModel(d, layers, needsVision)
 		if loadErr == nil {
 			return d, nil
 		}
@@ -614,9 +681,10 @@ func fitsWithBuffer(resident, avail int64, pct int) bool {
 // to get "effective headroom" — the headroom a fresh load would actually see.
 // Shared by selectAndLoad's reuse check and the eviction loop's pressure check
 // so the two never disagree about whether a healthy model is under pressure.
-// slots is the --parallel N concurrency the KV cache is sized for.
-func effectiveHeadroomFits(loaded *types.ModelDescriptor, loadedLayers, slots int, availRaw int64, bufferPct int) bool {
-	resident := GPUResidentMB(loaded.RequiredVRAMMB, ScaledKVOverheadMB(*loaded, slots), loadedLayers, loaded.TotalLayers)
+// slots is the --parallel N concurrency the KV cache is sized for; needsVision
+// selects loaded's vision-mode or text-mode footprint.
+func effectiveHeadroomFits(loaded *types.ModelDescriptor, loadedLayers int, needsVision bool, slots int, availRaw int64, bufferPct int) bool {
+	resident := GPUResidentMB(loaded.WeightMB(needsVision), ScaledKVOverheadMB(*loaded, slots, needsVision), loadedLayers, loaded.TotalLayers)
 	return fitsWithBuffer(resident, availRaw+resident, bufferPct)
 }
 
@@ -625,23 +693,33 @@ func effectiveHeadroomFits(loaded *types.ModelDescriptor, loadedLayers, slots in
 // runs with matches the FitLayers value selectAndLoad admitted the tier on.
 type gpuLayerSink interface{ SetNextGPULayers(int) }
 
-// loadModel records that we've selected this tier (and the GPU layer split
-// chosen for it), pushes that split to the inner backend, and applies the
-// OOMSimulator hook for tests. Actual subprocess startup happens lazily inside
-// the inner backend on the first Infer call.
-func (b *Backend) loadModel(d *types.ModelDescriptor, gpuLayers int) error {
+// visionSink is implemented by an inner backend (llamacpp.Backend) that can be
+// told whether its next load should be spawned WITH --mmproj, so the subprocess
+// that starts actually matches the mode selectAndLoad admitted the tier on.
+type visionSink interface{ SetNextNeedsVision(bool) }
+
+// loadModel records that we've selected this tier (the GPU layer split and
+// vision mode chosen for it), pushes both to the inner backend, and applies
+// the OOMSimulator hook for tests. Actual subprocess startup happens lazily
+// inside the inner backend on the first Infer call.
+func (b *Backend) loadModel(d *types.ModelDescriptor, gpuLayers int, needsVision bool) error {
 	if b.opts.OOMSimulator != nil && b.opts.OOMSimulator(*d) {
 		return &oomError{tier: string(d.TierLabel)}
 	}
 
-	if sink, ok := b.inners[d.TierLabel].(gpuLayerSink); ok {
+	inner := b.inners[d.TierLabel]
+	if sink, ok := inner.(gpuLayerSink); ok {
 		sink.SetNextGPULayers(gpuLayers)
+	}
+	if sink, ok := inner.(visionSink); ok {
+		sink.SetNextNeedsVision(needsVision)
 	}
 
 	now := time.Now()
 	b.mu.Lock()
 	b.loadedTier = d
 	b.loadedLayers = gpuLayers
+	b.loadedVision = needsVision
 	b.loadedAt = now
 	b.lastUsed = now
 	b.mu.Unlock()
@@ -669,6 +747,7 @@ func (b *Backend) evictLocked() backend.Backend {
 	inner := b.inners[tier]
 	b.loadedTier = nil
 	b.loadedLayers = 0
+	b.loadedVision = false
 	b.loadedAt = time.Time{}
 	slog.Info("model evicted",
 		slog.String(logschema.FieldEvent, string(logschema.EventModelEvicted)),
@@ -695,8 +774,10 @@ func stopInner(inner backend.Backend) error {
 
 // detectContention checks whether available VRAM has dropped below the
 // expected headroom for the currently loaded model and logs a warning.
-// It never blocks or aborts the request.
-func (b *Backend) detectContention(desc *types.ModelDescriptor) {
+// It never blocks or aborts the request. needsVision is this request's mode —
+// used only for the log line's resident-size estimate; the actual loaded mode
+// is read from b.loadedVision.
+func (b *Backend) detectContention(desc *types.ModelDescriptor, needsVision bool) {
 	avail, err := b.vram.AvailableMB()
 	if err != nil || avail < 0 {
 		return
@@ -708,10 +789,11 @@ func (b *Backend) detectContention(desc *types.ModelDescriptor) {
 	// after a load on an 8 GB card (our own model legitimately consumed the VRAM).
 	b.mu.Lock()
 	loadedLayers := b.loadedLayers
+	loadedVision := b.loadedVision
 	logged := b.contentionLogged
 	b.mu.Unlock()
 
-	underPressure := !effectiveHeadroomFits(desc, loadedLayers, b.opts.MaxParallel, avail, b.opts.BufferPct) &&
+	underPressure := !effectiveHeadroomFits(desc, loadedLayers, loadedVision, b.opts.MaxParallel, avail, b.opts.BufferPct) &&
 		avail < externalPressureFloorMB
 
 	if underPressure && !logged {
@@ -719,7 +801,7 @@ func (b *Backend) detectContention(desc *types.ModelDescriptor) {
 			slog.String(logschema.FieldEvent, string(logschema.EventContention)),
 			slog.Int64(logschema.FieldVRAMAvailMB, avail),
 			slog.Int64(logschema.FieldVRAMRequiredMB,
-				GPUResidentMB(desc.RequiredVRAMMB, ScaledKVOverheadMB(*desc, b.opts.MaxParallel), loadedLayers, desc.TotalLayers)),
+				GPUResidentMB(desc.WeightMB(needsVision), ScaledKVOverheadMB(*desc, b.opts.MaxParallel, needsVision), loadedLayers, desc.TotalLayers)),
 		)
 	}
 	b.mu.Lock()
