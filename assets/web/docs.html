@@ -1094,18 +1094,54 @@ request-scoped, cost, and lower than the tier it replaced (Qwen2.5-VL-3B,
 vision-mode footprint doesn't fit, the request returns <code>503 overloaded</code>
 rather than silently answering on a tier that can't see the image. Extreme
 pressure (&lt; 500 MB VRAM AND &gt; 90% CPU) defers like a text request.</p>
-<p><b>Model quality note:</b> LFM2-VL-3B (Liquid AI) reliably answers questions —
-specific or open-ended — about a real photo, and was chosen over a previous
-Qwen2.5-VL-3B weak tier specifically for calibration: on repeated identical
-test images, Qwen2.5-VL-3B produced a different confidently-wrong
-identification each time once asked to commit to one ("this is a Coca-Cola
-logo", "this is the Amazon Alexa logo", "this is a Raspberry Pi" — on an
-image that was none of those); LFM2-VL-3B gave the same, calibrated answer
-(or an honest "I don't recognise a specific name for this") across repeated
-runs on the same tests. No model at this size reliably identifies every
-specific device, dish, or product on sight — treat a specific-identification
-claim from this endpoint as a genuine attempt, not a guarantee, the same way
-you would any small local model.</p>
+<p><b>Model quality note — perception is reliable, recognition is not.</b>
+LFM2-VL-3B (Liquid AI) was chosen over a previous Qwen2.5-VL-3B weak tier
+for calibration: on repeated identical test images, Qwen2.5-VL-3B produced a
+different confidently-wrong identification each time once asked to commit
+to one ("this is a Coca-Cola logo", "this is the Amazon Alexa logo", "this
+is a Raspberry Pi" — on an image that was none of those); LFM2-VL-3B gave
+the same, calibrated answer (or an honest "I don't recognise a specific
+name for this") across repeated runs. Real-photo testing after that swap
+found a consistent, specific pattern worth knowing before you rely on this
+endpoint for anything:</p>
+<ul style="color:#a1a1aa; line-height:1.9; padding-left:20px; margin-bottom:10px;">
+  <li><b>Reliable:</b> composition, layout, and spatial relationships
+    ("top right", "next to the laptop"); colours; counting and locating
+    objects; distinguishing "this is a real, describable object" from
+    "this is ambiguous/abstract" (it does not fabricate a confident guess
+    on a genuinely unclear image); plain, high-contrast printed text.</li>
+  <li><b>Not reliable — perception is fine, the model just doesn't know the
+    name:</b> naming a <em>specific</em> real-world thing by visual
+    signature — a product model, a brand, a named dish, a landmark. On a
+    real test photo of a desk it correctly described a small-board
+    device's ports, pin header, and cooling fan without ever saying
+    "Raspberry Pi"; on a plate of Hainanese chicken rice it correctly
+    listed every ingredient (rice, sliced chicken, cucumber, dipping
+    sauce) without ever naming the dish. Asking it more directly, or with
+    example names as hints, did not reliably fix this. This is a genuine
+    training-data/model-size ceiling, not a bug — production computer
+    vision systems that need specific product/dish/landmark recognition
+    normally use a purpose-trained classifier or an embedding-lookup
+    against a known database for that step, not a general small VLM.</li>
+  <li><b>Not reliable — stylised text:</b> plain printed text reads
+    correctly; a decorative or logo-style font (tested: a road-sign-style
+    cutout wordmark) was misread differently on repeated runs of the
+    identical image ("Longing AI", "Longg AI", "LONG", "Loona" for a sign
+    that actually read "Lorong AI"). Increasing the image's effective
+    resolution (<code>--image-max-tokens</code>, roughly doubling the
+    image token budget) measurably changed how much detail the model
+    processed but did not fix this — it is a font/rendering-style
+    limitation, not a resolution-limited legibility problem, so raising
+    resolution is not an available mitigation.</li>
+</ul>
+<p>Treat a specific-identification or exact-text-transcription claim from
+this endpoint as a genuine attempt, not a guarantee — the same way you
+would any 1–4B-parameter local vision model. An app design that only needs
+the reliable half above (describe/count/locate/plain-text) will get
+consistent results; one that depends on the model recognising a specific
+product, dish, or logo by name should not rely on this endpoint for that
+step, the same way a production CV pipeline would not rely on a general
+VLM for it either.</p>
 <p>Multimodal support is <em>per-tier</em>, not a separate backend type: a future
 audio-capable model would extend the same tier the same way (a second
 conditionally-loaded projector), not add a new orchestration layer.</p>
