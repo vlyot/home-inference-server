@@ -1100,6 +1100,18 @@ not a prompt-wording issue. This has no practical effect on real-world use
 (photos, screenshots, diagrams all have the texture/structure the encoder
 expects); it only shows up on synthetic test fixtures like a solid-colour
 placeholder image.</p>
+<p><b>Known limitation — object identification, not just perception:</b> at 3B
+parameters and Q4 quantization, the model reliably describes what it sees
+(shapes, layout, colours, spatial relationships, text it can read) but can
+mis-identify specific hardware or objects it hasn't seen enough of in
+training — e.g. correctly noting "a black box with multiple ports and a
+cooling fan" while guessing at a generic category ("capture card", "audio
+interface") rather than recognising a specific device (a Raspberry Pi, a
+particular piece of gear). This is a real capability ceiling of the
+weak-tier-only, VRAM-constrained model size chosen for this project, not a
+bug — a caller needing reliable fine-grained object identification should
+not treat this endpoint's guesses at "what specific thing is this" as
+authoritative, only its lower-level description of what's visible.</p>
 <p>Multimodal support is <em>per-tier</em>, not a separate backend type: a future
 audio-capable model would extend the same tier the same way (a second
 conditionally-loaded projector), not add a new orchestration layer.</p>
