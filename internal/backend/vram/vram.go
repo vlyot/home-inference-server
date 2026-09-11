@@ -167,6 +167,34 @@ const describeSystemPrompt = "You are a helpful assistant."
 
 // describePrompt asks the loaded vision-capable tier for a literal, exhaustive
 // description.
+//
+// Phase 13e follow-up: tried an identification-first rewrite (explicitly
+// asking the model to name specific dishes/devices/products with a
+// confidence word, framed as "you are the eyes for another AI") after two
+// real-hardware misses — a Raspberry-Pi-shaped device described only as "a
+// black component with multiple ports" and a plate of Hainanese chicken
+// rice described only by raw ingredients, both leading the reasoning model
+// to a generic non-committal answer. The rewrite's first test run did
+// produce a correct "This is a Raspberry Pi" — but repeating it on the same
+// image, and on an unrelated abstract-shapes image, produced confidently
+// wrong identifications instead ("Amazon Alexa logo", "an animated
+// character", "Coca-Cola", "Raspberry Pi" again on the wrong image) at
+// roughly the same rate as correct ones. Pushing the model to "commit to
+// identifications, don't retreat into generic categories" did not make it
+// more accurate — at this model size (Qwen2.5-VL-3B, Q4_K_M) it made
+// confident hallucination more likely, which is worse than the original
+// hedge-everything behaviour for any image the model doesn't genuinely
+// recognise. Reverted. A follow-up investigation into a larger vision-
+// capable tier (Qwen2.5-VL-7B) found its estimated resident VRAM
+// (~7.6-8.4 GB depending on --parallel slots, from real on-disk byte counts
+// scaled by this project's measured KV/mmproj-overhead formula) would
+// consume essentially the entire 8 GB card and likely force the same
+// partial-CPU-offload condition already found to correlate with subprocess
+// crashes — ruled out without a live test on the strength of that estimate
+// plus the already-proven crash risk. This is an accepted, documented
+// capability ceiling of the weak-tier-only model size chosen for this
+// project (see roadmap and the docs.html "known limitation" note), not
+// something to keep chasing via prompt wording.
 const describePrompt = `Describe this image factually: its dominant colours, ` +
 	`every object and where it is, any visible text or numbers exactly as ` +
 	`written, people and what they are doing, and the overall composition. ` +
