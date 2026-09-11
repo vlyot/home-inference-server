@@ -151,18 +151,21 @@ func (b *Backend) Modality() backend.ModalityKind { return b.modality }
 
 func (b *Backend) Ready() bool { return true }
 
-// describeSystemPrompt is the standard Qwen2.5-VL system framing (matches the
-// model card's and every reference llama.cpp/vLLM invocation's usage). Root
-// cause of the earlier refusal bug: this server sent vision requests with no
-// system-role turn at all — chatShape wrapped the prompt as a single bare
-// user turn, so the model's jinja chat template had nothing establishing it
-// as an image-capable assistant, and a small VLM given an image with no
-// system turn tends to fall back to a generic "I cannot see images"
-// text-completion refusal. A wording change to the user prompt alone
-// ("you can see this image clearly...") only reduced the refusal rate via
-// sampling luck (confirmed unreliable: refused ~50% in production, and
-// deterministically at temperature 0) — the missing system turn was the
-// actual defect, not the prompt's phrasing.
+// describeSystemPrompt is a standard, minimal system framing. Originally
+// added for Qwen2.5-VL-3B (the weak tier before Phase 13f's swap to
+// LFM2-VL-3B — see describePrompt below) to fix a refusal bug: that model
+// was sent vision requests with no system-role turn at all — chatShape
+// wrapped the prompt as a single bare user turn, so the model's jinja chat
+// template had nothing establishing it as an image-capable assistant, and a
+// small VLM given an image with no system turn tends to fall back to a
+// generic "I cannot see images" text-completion refusal. A wording change to
+// the user prompt alone ("you can see this image clearly...") only reduced
+// the refusal rate via sampling luck (confirmed unreliable: refused ~50% in
+// production, and deterministically at temperature 0) — the missing system
+// turn was the actual defect, not the prompt's phrasing. Kept unchanged
+// across the LFM2-VL-3B swap: it is correct, standard chat-template usage
+// regardless of which model is loaded, and LFM2-VL-3B never exhibited the
+// refusal behaviour this was fixing in the first place.
 const describeSystemPrompt = "You are a helpful assistant."
 
 // describePrompt asks the loaded vision-capable tier for a literal, exhaustive

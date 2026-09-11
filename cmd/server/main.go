@@ -89,30 +89,59 @@ const llamaExe = `C:\llama\llama-server.exe`
 var defaultRoster = []types.ModelDescriptor{
 	{
 		TierLabel: types.TierWeak,
-		Name:      "qwen2.5-vl-3b-instruct",
-		FilePath:  `models\qwen2.5-vl-3b-instruct-q4_k_m.gguf`,
+		Name:      "lfm2-vl-3b-instruct",
+		FilePath:  `models\lfm2-vl-3b-instruct-q4_k_m.gguf`,
 		// MMProjPath makes this tier vision-capable. It is passed to
 		// llama-server ONLY on a load that a vision request triggers
 		// (llamacpp.Backend.ensureRunning consults SetNextNeedsVision) — a
 		// plain text load never touches --mmproj or the VRAM it costs. See
 		// HasVision(), WeightMB(), VisionKVParts().
-		MMProjPath:     `models\mmproj-qwen2.5-vl-3b-instruct-q8_0.gguf`,
-		RequiredVRAMMB: 1840, // Q4_K_M text weights, measured file size
+		//
+		// Swapped from qwen2.5-vl-3b-instruct (Phase 13f): Qwen2.5-VL-3B
+		// reliably hallucinated a different confident-but-wrong identification
+		// on the same test image across repeated runs once prompted to commit
+		// to identifications ("Coca-Cola", "Amazon Alexa logo", "Raspberry Pi"
+		// — never the same answer twice). LFM2-VL-3B (Liquid AI, SigLIP2 NaFlex
+		// encoder with real image-token reduction) passed the same repeated
+		// test cleanly: consistent, calibrated answers, no hallucinated brand
+		// names, and a real quality edge over its own 1.6B sibling (MMMU 48.4
+		// vs 40.56, Liquid's published numbers) while measuring LOWER resident
+		// VRAM than the Qwen2.5-VL-3B setup it replaces. Two other candidate
+		// families were tested and rejected on real hardware first — see
+		// roadmap.md: Qwen3-VL (2B and 4B both measured ~6 GB resident
+		// regardless of text-model size, the vision encoder's fixed cost
+		// dominates, not the text backbone) and Gemma-4-E2B-vision (burns its
+		// entire token budget in reasoning mode, then falsely claims no image
+		// was provided).
+		MMProjPath:     `models\mmproj-lfm2-vl-3b-instruct-q8_0.gguf`,
+		RequiredVRAMMB: 1568, // Q4_K_M text weights, measured file size (1567.7 MB)
 		Modality:       "text",
-		TotalLayers:    36, // qwen2vl.block_count from the GGUF metadata
-		KVCacheMB:      320,
-		KVFixedMB:      180,
-		// Vision-mode constants: same weights (native Qwen2.5-VL, no separate
-		// vision checkpoint) plus the ~805 MB mmproj and its own compute
-		// buffers. Measured on the GPU: a full-GPU vision load's estimate
-		// (weight 1840 + KVFixedMB 1600 + KVCacheMB*2 slots = 4080) tracked a
-		// real nvidia-smi peak of ~5000 MB including the ~1760 MB idle
-		// baseline (~3240 MB resident) — conservative in the safe direction
-		// (over-, not under-, booked). See roadmap.md for the full run.
-		VisionRequiredVRAMMB: 1840,
-		VisionKVCacheMB:      320,
-		VisionKVFixedMB:      1600,
+		TotalLayers:    30, // lfm2.block_count from the GGUF metadata
+		KVCacheMB:      40,
+		KVFixedMB:      182,
+		// Vision-mode constants, measured on the real GPU (RTX 4060 Ti 8 GB):
+		// text-only load (no --mmproj) resident ~1830 MB at --parallel 2,
+		// ~1939 MB at --parallel 1; vision-mode load (with --mmproj) resident
+		// ~2450 MB at --parallel 2, ~2630 MB at --parallel 1. The per-slot
+		// swing between parallel=1 and parallel=2 was smaller than the ~100 MB
+		// run-to-run measurement noise floor (LFM2's hybrid conv+attention
+		// architecture appears to carry very little KV-cache pressure), so
+		// KVCacheMB/VisionKVCacheMB are a small conservative nonzero floor
+		// rather than a value derived from a clean per-slot delta, and
+		// VisionKVFixedMB is sized off the HIGHER of the two vision-mode
+		// readings (2630, not 2450) to stay on the safe (over-, not under-)
+		// booking side per this project's convention. See roadmap.md for the
+		// full measurement log.
+		VisionRequiredVRAMMB: 1568,
+		VisionKVCacheMB:      40,
+		VisionKVFixedMB:      982,
 		Port:                 8093,
+		// RequireChatTemplate: LFM2-VL-3B produced noticeably degraded output
+		// on a raw prompt-only /completion request (repetition loops, or a
+		// quiz-continuation like "A) Paris B) London..." instead of a direct
+		// answer) — the same prompt through the chat-template path answered
+		// correctly every time. See types.ModelDescriptor.RequireChatTemplate.
+		RequireChatTemplate: true,
 	},
 	{
 		TierLabel:      types.TierMid,

@@ -59,6 +59,22 @@ type ModelDescriptor struct {
 	VisionRequiredVRAMMB int64 `json:"vision_required_vram_mb,omitempty"`
 	VisionKVCacheMB      int64 `json:"vision_kv_cache_mb,omitempty"`
 	VisionKVFixedMB      int64 `json:"vision_kv_fixed_mb,omitempty"`
+
+	// RequireChatTemplate forces every request to this tier through
+	// llama-server's /v1/chat/completions endpoint (the model's own
+	// GGUF-embedded jinja chat template applied), even a plain
+	// text_input.prompt request with no Messages that would otherwise take
+	// the templateless /completion endpoint. Added for LFM2-VL-3B (Phase
+	// 13f): a raw prompt-only completion on this model produced noticeably
+	// degraded output — repetition loops, or a quiz-continuation style
+	// ("A) Paris B) London...") instead of a direct instruct-style answer —
+	// while the exact same prompt through the chat-template path answered
+	// correctly and concisely every time. Some instruct-tuned models depend
+	// on their chat template's special tokens/framing much more than others;
+	// this flag lets a roster entry opt into "always template" without
+	// changing behaviour for tiers that don't need it (Gemma-4 mid/strong
+	// tolerate raw completions fine and are unaffected).
+	RequireChatTemplate bool `json:"require_chat_template,omitempty"`
 }
 
 // HasVision reports whether this tier has a vision-capable (--mmproj) variant.

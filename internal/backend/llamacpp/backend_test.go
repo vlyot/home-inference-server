@@ -305,12 +305,30 @@ func TestInfer_UsesCompletionEndpointForPromptOnly(t *testing.T) {
 	}
 }
 
+// TestInfer_RequireChatTemplateForcesChatEndpointForPromptOnly guards the
+// LFM2-VL-3B fix (Phase 13f): a tier whose ModelDescriptor sets
+// RequireChatTemplate must route even a plain prompt-only request through
+// /v1/chat/completions, not /completion.
+func TestInfer_RequireChatTemplateForcesChatEndpointForPromptOnly(t *testing.T) {
+	srv, st := chatStub(t)
+	b := makeTestBackend(srv.URL)
+	b.desc.RequireChatTemplate = true
+
+	_, err := b.Infer(context.Background(), backend.Request{Prompt: "just a prompt"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if st.chatHits != 1 || st.completionHits != 0 {
+		t.Fatalf("chatHits=%d completionHits=%d; want 1/0", st.chatHits, st.completionHits)
+	}
+}
+
 func TestChatShape_PrependsSystemTurnForImageWithSystemPrompt(t *testing.T) {
 	req := chatShape(backend.Request{
 		Prompt:       "describe it",
 		SystemPrompt: "You are a helpful assistant.",
 		ImageData:    []byte{1, 2, 3},
-	})
+	}, false)
 	if len(req.Messages) != 2 {
 		t.Fatalf("Messages = %d entries; want 2", len(req.Messages))
 	}
@@ -323,7 +341,7 @@ func TestChatShape_PrependsSystemTurnForImageWithSystemPrompt(t *testing.T) {
 }
 
 func TestChatShape_NoSystemTurnWhenSystemPromptEmpty(t *testing.T) {
-	req := chatShape(backend.Request{Prompt: "describe it", ImageData: []byte{1, 2, 3}})
+	req := chatShape(backend.Request{Prompt: "describe it", ImageData: []byte{1, 2, 3}}, false)
 	if len(req.Messages) != 1 {
 		t.Fatalf("Messages = %d entries; want 1", len(req.Messages))
 	}
@@ -333,17 +351,39 @@ func TestChatShape_NoSystemTurnWhenSystemPromptEmpty(t *testing.T) {
 }
 
 func TestChatShape_SystemPromptIgnoredWithoutImage(t *testing.T) {
-	req := chatShape(backend.Request{Prompt: "just text", SystemPrompt: "sys"})
+	req := chatShape(backend.Request{Prompt: "just text", SystemPrompt: "sys"}, false)
 	if len(req.Messages) != 0 {
-		t.Errorf("Messages = %d entries; want 0 (no image => plain /completion path, unaffected)", len(req.Messages))
+		t.Errorf("Messages = %d entries; want 0 (no image, no forceTemplate => plain /completion path, unaffected)", len(req.Messages))
 	}
 }
 
 func TestChatShape_LeavesExistingMessagesUnchanged(t *testing.T) {
 	orig := []backend.Message{{Role: "user", Content: "hi"}}
-	req := chatShape(backend.Request{Messages: orig, SystemPrompt: "sys", ImageData: []byte{1}})
+	req := chatShape(backend.Request{Messages: orig, SystemPrompt: "sys", ImageData: []byte{1}}, false)
 	if len(req.Messages) != 1 || req.Messages[0].Role != "user" {
 		t.Errorf("Messages = %+v; want unchanged single user turn (SystemPrompt must not override an explicit Messages list)", req.Messages)
+	}
+}
+
+// TestChatShape_ForceTemplateAppliesToPlainTextPrompt guards the fix for a
+// real GPU finding (LFM2-VL-3B, Phase 13f): a raw prompt-only /completion
+// request produced noticeably degraded output (repetition loops, or a
+// quiz-continuation instead of a direct answer) on this model, while the
+// same prompt through the chat-template path answered correctly. A
+// ModelDescriptor with RequireChatTemplate set must force even a
+// no-image, no-Messages plain-text request through the chat-shaped path.
+func TestChatShape_ForceTemplateAppliesToPlainTextPrompt(t *testing.T) {
+	req := chatShape(backend.Request{Prompt: "just text"}, true)
+	if len(req.Messages) != 1 || req.Messages[0].Role != "user" || req.Messages[0].Content != "just text" {
+		t.Errorf("Messages = %+v; want a single user turn (forceTemplate=true must chat-shape even a bare prompt)", req.Messages)
+	}
+}
+
+func TestChatShape_ForceTemplateDoesNotOverrideExistingMessages(t *testing.T) {
+	orig := []backend.Message{{Role: "user", Content: "hi"}}
+	req := chatShape(backend.Request{Messages: orig, Prompt: "ignored"}, true)
+	if len(req.Messages) != 1 || req.Messages[0].Content != "hi" {
+		t.Errorf("Messages = %+v; want unchanged (an explicit Messages list must win over forceTemplate)", req.Messages)
 	}
 }
 

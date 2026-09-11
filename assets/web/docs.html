@@ -211,7 +211,7 @@
 
 <h3>Vision (image → text)</h3>
 <p><code>modality: "vision"</code> is answered directly by the weak tier
-(<code>qwen2.5-vl-3b-instruct</code>), a natively multimodal model &mdash; it
+(<code>lfm2-vl-3b-instruct</code>), a natively multimodal model &mdash; it
 sees the image and your <code>prompt</code> together in one inference, no
 separate captioning hop. See <a href="#vision-mode">How vision works</a> below
 for how the server decides when to load the vision projector. Send the image as
@@ -1053,8 +1053,8 @@ There is no local defer queue and no local drain loop.</p>
     </tr>
     <tr>
       <td><span class="badge badge-normal">weak</span></td>
-      <td class="field-name">qwen2.5-vl-3b-instruct</td>
-      <td>1840 MB (+805 MB mmproj for a vision load)</td>
+      <td class="field-name">lfm2-vl-3b-instruct</td>
+      <td>1568 MB (+587 MB mmproj for a vision load)</td>
       <td>&check;</td>
       <td class="field-desc">The last resort before deferral for text, and the <strong>only</strong> vision-capable tier — a natively multimodal model, so it answers image questions directly rather than through a separate captioning step. See <a href="#vision-mode">How vision works</a>.</td>
     </tr>
@@ -1065,7 +1065,7 @@ There is no local defer queue and no local drain loop.</p>
 <h3 id="vision-mode">How vision works (native multimodal weak tier)</h3>
 <p>There is no separate vision model or pipeline. <code>modality: "vision"</code>
 is answered by the <strong>same</strong> weak-tier subprocess text uses —
-<code>qwen2.5-vl-3b-instruct</code> — loaded with its vision projector
+<code>lfm2-vl-3b-instruct</code> — loaded with its vision projector
 (<code>--mmproj</code>) so it sees the image directly in one inference. That
 projector is <strong>only</strong> loaded for a request that actually carries an
 image:</p>
@@ -1085,33 +1085,27 @@ image:</p>
 </ol>
 <p><b>The point of the split:</b> a plain text request never pays for the mmproj —
 same subprocess identity, but no extra VRAM unless an image is actually in
-flight. Measured on an RTX 4060 Ti (8 GB): text-mode weak resident
-~2.2&ndash;2.3 GB; vision-mode weak resident ~3.2&ndash;3.6 GB (weight 1840 MB +
-mmproj 805 MB + KV/compute overhead) — a real, but request-scoped, cost.</p>
+flight. Measured on an RTX 4060 Ti (8 GB) at <code>max_parallel = 2</code>:
+text-mode weak resident ~1.8 GB; vision-mode weak resident ~2.4&ndash;2.6 GB
+(weight 1568 MB + mmproj 587 MB + KV/compute overhead) — a real, but
+request-scoped, cost, and lower than the tier it replaced (Qwen2.5-VL-3B,
+~3.2&ndash;3.6 GB vision-mode resident).</p>
 <p><b>Degradation:</b> if VRAM pressure is so tight that even the weak tier's
 vision-mode footprint doesn't fit, the request returns <code>503 overloaded</code>
 rather than silently answering on a tier that can't see the image. Extreme
 pressure (&lt; 500 MB VRAM AND &gt; 90% CPU) defers like a text request.</p>
-<p><b>Model quality note:</b> Qwen2.5-VL-3B reliably answers questions — specific
-or open-ended — about a real photo. It can occasionally refuse ("I cannot see
-the image") when given a flat, textureless, single-colour image with no
-photographic content — an out-of-distribution input for the vision encoder,
-not a prompt-wording issue. This has no practical effect on real-world use
-(photos, screenshots, diagrams all have the texture/structure the encoder
-expects); it only shows up on synthetic test fixtures like a solid-colour
-placeholder image.</p>
-<p><b>Known limitation — object identification, not just perception:</b> at 3B
-parameters and Q4 quantization, the model reliably describes what it sees
-(shapes, layout, colours, spatial relationships, text it can read) but can
-mis-identify specific hardware or objects it hasn't seen enough of in
-training — e.g. correctly noting "a black box with multiple ports and a
-cooling fan" while guessing at a generic category ("capture card", "audio
-interface") rather than recognising a specific device (a Raspberry Pi, a
-particular piece of gear). This is a real capability ceiling of the
-weak-tier-only, VRAM-constrained model size chosen for this project, not a
-bug — a caller needing reliable fine-grained object identification should
-not treat this endpoint's guesses at "what specific thing is this" as
-authoritative, only its lower-level description of what's visible.</p>
+<p><b>Model quality note:</b> LFM2-VL-3B (Liquid AI) reliably answers questions —
+specific or open-ended — about a real photo, and was chosen over a previous
+Qwen2.5-VL-3B weak tier specifically for calibration: on repeated identical
+test images, Qwen2.5-VL-3B produced a different confidently-wrong
+identification each time once asked to commit to one ("this is a Coca-Cola
+logo", "this is the Amazon Alexa logo", "this is a Raspberry Pi" — on an
+image that was none of those); LFM2-VL-3B gave the same, calibrated answer
+(or an honest "I don't recognise a specific name for this") across repeated
+runs on the same tests. No model at this size reliably identifies every
+specific device, dish, or product on sight — treat a specific-identification
+claim from this endpoint as a genuine attempt, not a guarantee, the same way
+you would any small local model.</p>
 <p>Multimodal support is <em>per-tier</em>, not a separate backend type: a future
 audio-capable model would extend the same tier the same way (a second
 conditionally-loaded projector), not add a new orchestration layer.</p>

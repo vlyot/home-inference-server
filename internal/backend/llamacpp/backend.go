@@ -226,12 +226,13 @@ func (b *Backend) InferStream(ctx context.Context, req backend.Request, chunkFn 
 }
 
 // runComplete dispatches to the chat-completions endpoint when the request
-// carries a message list OR an image (the /completion endpoint has no chat
-// template and no --mmproj image path), otherwise the single-prompt endpoint.
-// A prompt-only image request is promoted to a one-turn user message so
-// toChatMessages can attach the image_url part.
+// carries a message list, an image, or this tier's descriptor sets
+// RequireChatTemplate (the /completion endpoint has no chat template and no
+// --mmproj image path), otherwise the single-prompt endpoint. A prompt-only
+// image request is promoted to a one-turn user message so toChatMessages can
+// attach the image_url part.
 func (b *Backend) runComplete(ctx context.Context, baseURL string, req backend.Request) (backend.Response, error) {
-	if req := chatShape(req); len(req.Messages) > 0 {
+	if req := chatShape(req, b.desc.RequireChatTemplate); len(req.Messages) > 0 {
 		req.MaxTokens = b.resolveChatMaxTokens(ctx, baseURL, req)
 		return chatComplete(ctx, baseURL, req)
 	}
@@ -242,7 +243,7 @@ func (b *Backend) runComplete(ctx context.Context, baseURL string, req backend.R
 // /completion endpoint has no chat template and therefore no reasoning
 // concept, so its deltas are always tagged ChunkContent.
 func (b *Backend) runCompleteStream(ctx context.Context, baseURL string, req backend.Request, chunkFn func(kind backend.ChunkKind, delta string)) (backend.Response, error) {
-	if req := chatShape(req); len(req.Messages) > 0 {
+	if req := chatShape(req, b.desc.RequireChatTemplate); len(req.Messages) > 0 {
 		req.MaxTokens = b.resolveChatMaxTokens(ctx, baseURL, req)
 		return chatCompleteStream(ctx, baseURL, req, chunkFn)
 	}
@@ -251,10 +252,14 @@ func (b *Backend) runCompleteStream(ctx context.Context, baseURL string, req bac
 	})
 }
 
-// chatShape returns req unchanged when it already has Messages, and otherwise —
-// only if it carries an image — wraps its Prompt as a chat message list so the
-// chat/completions (--mmproj) path is used. A prompt-only text request is left
-// alone so it still takes the plain /completion endpoint.
+// chatShape returns req unchanged when it already has Messages, and otherwise
+// wraps its Prompt as a chat message list — always when forceTemplate is set
+// (this tier's ModelDescriptor.RequireChatTemplate), or when the request
+// carries an image — so the chat/completions (and --mmproj, for an image)
+// path is used. A plain prompt-only text request on a tier that does NOT
+// require the template is left alone so it still takes the plain
+// /completion endpoint (cheaper: no /tokenize round trip for max-tokens
+// resolution).
 //
 // A non-empty SystemPrompt is prepended as its own {role: "system"} turn
 // rather than concatenated into the user turn's text: llama-server's jinja
@@ -263,8 +268,11 @@ func (b *Backend) runCompleteStream(ctx context.Context, baseURL string, req bac
 // model given an image with no system turn at all tends to fall back to a
 // generic "I cannot see images" text-completion refusal instead of answering
 // — a known small-VLM failure mode, not a wording problem in the user prompt.
-func chatShape(req backend.Request) backend.Request {
-	if len(req.Messages) > 0 || len(req.ImageData) == 0 {
+func chatShape(req backend.Request, forceTemplate bool) backend.Request {
+	if len(req.Messages) > 0 {
+		return req
+	}
+	if len(req.ImageData) == 0 && !forceTemplate {
 		return req
 	}
 	if req.SystemPrompt != "" {
