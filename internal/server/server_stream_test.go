@@ -229,6 +229,35 @@ func TestStreamCrashBeforeAnyContentIsStillAnError(t *testing.T) {
 	}
 }
 
+// TestStreamCrashWithResponseFormatIsNeverSalvaged guards the primary use
+// case (client apps doing structured JSON extraction, not the sandbox chat
+// UI): a mid-stream crash after content was delivered must still surface as
+// a hard Error, never Truncated, when response_format constrained the
+// output. Half a JSON object is not a usable partial answer — it's invalid
+// JSON that will fail json.Unmarshal on the caller's side — so the
+// prose-salvage behaviour (correct for chat.html) must not kick in here.
+func TestStreamCrashWithResponseFormatIsNeverSalvaged(t *testing.T) {
+	stub := &crashMidStreamStub{deltas: []string{`{"name": "Al`}, errModelTier: "strong"}
+	h := streamHarnessWithBackend(t, stub)
+
+	resp := post(t, h.ts.URL+api.PathInfer, api.InferRequest{
+		Modality:       api.ModalityText,
+		TextInput:      &api.TextInput{Messages: []api.ChatMessage{{Role: "user", Content: "hi"}}},
+		Stream:         true,
+		ResponseFormat: json.RawMessage(`{"type":"json_object"}`),
+	})
+	defer resp.Body.Close()
+
+	chunks := readSSEChunks(t, resp)
+	last := chunks[len(chunks)-1]
+	if last.Truncated {
+		t.Error("Truncated = true with response_format set; want false — a JSON-mode caller must never be handed unparseable partial JSON as a soft success")
+	}
+	if last.Error != api.ErrCodeInternal {
+		t.Errorf("error = %q; want %q — a mid-stream crash under response_format must still be a hard error", last.Error, api.ErrCodeInternal)
+	}
+}
+
 func TestStreamZeroOutputRecordsFailedJob(t *testing.T) {
 	stub := &streamStub{deltas: nil, tokens: 0}
 	h := streamHarness(t, stub)

@@ -93,7 +93,17 @@ func (s *Server) handleInferStream(w http.ResponseWriter, r *http.Request, req a
 	queueWaitMS := startedAt.Sub(enqueuedAt).Milliseconds()
 	inferenceMS := finishedAt.Sub(startedAt).Milliseconds()
 
-	if err != nil && contentEmitted {
+	// Salvaging partial content only makes sense for free-form prose: half a
+	// sentence is still a real, readable answer. It does NOT make sense when
+	// response_format constrained the output to JSON — a stream cut off
+	// mid-object is not "an incomplete answer a caller could use", it's
+	// invalid JSON that will fail to parse, and a client trusting Truncated
+	// as "safe to use" would break on it. Structured-output callers (the
+	// primary consumers of this API — see docs) need an unambiguous failure
+	// here, not a partial payload dressed up as a soft success.
+	salvageable := len(req.ResponseFormat) == 0
+
+	if err != nil && contentEmitted && salvageable {
 		// The backend failed AFTER already streaming real content (observed on
 		// real hardware: the Gemma-4 subprocess can crash mid-generation from
 		// an unresolved upstream llama.cpp bug — see roadmap). Every prior
@@ -147,12 +157,26 @@ func (s *Server) handleInferStream(w http.ResponseWriter, r *http.Request, req a
 		if isBackendErr(err, &be) {
 			errCode = be.Code
 		}
-		slog.Info("job failed (stream)",
-			slog.String(logschema.FieldEvent, string(logschema.EventJobFailed)),
-			slog.String(logschema.FieldCorrelationID, req.CorrelationID),
-			slog.String(logschema.FieldRequestID, backendReq.RequestID),
-			slog.String(logschema.FieldErrorCode, errCode),
-		)
+		if contentEmitted {
+			// Reaches here only when !salvageable (response_format was set) —
+			// real content streamed but had to be discarded as unparseable
+			// partial JSON rather than salvaged. Worth a distinct log line:
+			// this is the "the crash mitigation didn't apply here, and here's
+			// why" case, not a from-the-start failure.
+			slog.Info("job failed (stream) — partial content discarded, not salvageable (response_format set)",
+				slog.String(logschema.FieldEvent, string(logschema.EventJobFailed)),
+				slog.String(logschema.FieldCorrelationID, req.CorrelationID),
+				slog.String(logschema.FieldRequestID, backendReq.RequestID),
+				slog.String(logschema.FieldErrorCode, errCode),
+			)
+		} else {
+			slog.Info("job failed (stream)",
+				slog.String(logschema.FieldEvent, string(logschema.EventJobFailed)),
+				slog.String(logschema.FieldCorrelationID, req.CorrelationID),
+				slog.String(logschema.FieldRequestID, backendReq.RequestID),
+				slog.String(logschema.FieldErrorCode, errCode),
+			)
+		}
 		s.recordJob(types.JobEntry{
 			RequestID:     backendReq.RequestID,
 			CorrelationID: req.CorrelationID,
