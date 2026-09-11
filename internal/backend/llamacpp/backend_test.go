@@ -305,6 +305,48 @@ func TestInfer_UsesCompletionEndpointForPromptOnly(t *testing.T) {
 	}
 }
 
+func TestChatShape_PrependsSystemTurnForImageWithSystemPrompt(t *testing.T) {
+	req := chatShape(backend.Request{
+		Prompt:       "describe it",
+		SystemPrompt: "You are a helpful assistant.",
+		ImageData:    []byte{1, 2, 3},
+	})
+	if len(req.Messages) != 2 {
+		t.Fatalf("Messages = %d entries; want 2", len(req.Messages))
+	}
+	if req.Messages[0].Role != "system" || req.Messages[0].Content != "You are a helpful assistant." {
+		t.Errorf("Messages[0] = %+v; want system/'You are a helpful assistant.'", req.Messages[0])
+	}
+	if req.Messages[1].Role != "user" || req.Messages[1].Content != "describe it" {
+		t.Errorf("Messages[1] = %+v; want user/'describe it'", req.Messages[1])
+	}
+}
+
+func TestChatShape_NoSystemTurnWhenSystemPromptEmpty(t *testing.T) {
+	req := chatShape(backend.Request{Prompt: "describe it", ImageData: []byte{1, 2, 3}})
+	if len(req.Messages) != 1 {
+		t.Fatalf("Messages = %d entries; want 1", len(req.Messages))
+	}
+	if req.Messages[0].Role != "user" {
+		t.Errorf("Messages[0].Role = %q; want user", req.Messages[0].Role)
+	}
+}
+
+func TestChatShape_SystemPromptIgnoredWithoutImage(t *testing.T) {
+	req := chatShape(backend.Request{Prompt: "just text", SystemPrompt: "sys"})
+	if len(req.Messages) != 0 {
+		t.Errorf("Messages = %d entries; want 0 (no image => plain /completion path, unaffected)", len(req.Messages))
+	}
+}
+
+func TestChatShape_LeavesExistingMessagesUnchanged(t *testing.T) {
+	orig := []backend.Message{{Role: "user", Content: "hi"}}
+	req := chatShape(backend.Request{Messages: orig, SystemPrompt: "sys", ImageData: []byte{1}})
+	if len(req.Messages) != 1 || req.Messages[0].Role != "user" {
+		t.Errorf("Messages = %+v; want unchanged single user turn (SystemPrompt must not override an explicit Messages list)", req.Messages)
+	}
+}
+
 func TestToChatMessages_PlainWhenNoImage(t *testing.T) {
 	msgs := toChatMessages(backend.Request{
 		Messages: []backend.Message{

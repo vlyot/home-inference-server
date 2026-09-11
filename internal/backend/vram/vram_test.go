@@ -1185,11 +1185,15 @@ type visionAwareStub struct {
 	shutdowns   int
 	lastVision  bool
 	visionCalls int
+	lastReq     backend.Request
 }
 
 func (v *visionAwareStub) Modality() backend.ModalityKind { return backend.ModalityKindText }
 func (v *visionAwareStub) Ready() bool                    { return true }
 func (v *visionAwareStub) Infer(_ context.Context, req backend.Request) (backend.Response, error) {
+	v.mu.Lock()
+	v.lastReq = req
+	v.mu.Unlock()
 	return backend.Response{Output: "ok", TokPerSecSample: 10}, nil
 }
 func (v *visionAwareStub) Shutdown(context.Context) error {
@@ -1209,6 +1213,12 @@ func (v *visionAwareStub) snapshot() (shutdowns, visionCalls int, lastVision boo
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	return v.shutdowns, v.visionCalls, v.lastVision
+}
+
+func (v *visionAwareStub) lastRequest() backend.Request {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.lastReq
 }
 
 // visionRoster is a 3-tier roster where only weak has a vision variant,
@@ -1394,6 +1404,9 @@ func TestDescribe_RoutesThroughNormalSelectAndLoad(t *testing.T) {
 	_, calls, lastVision := weak.snapshot()
 	if calls == 0 || !lastVision {
 		t.Errorf("SetNextNeedsVision calls=%d lastVision=%v; want at least 1 call, true", calls, lastVision)
+	}
+	if weak.lastRequest().SystemPrompt == "" {
+		t.Error("Describe's request should carry a non-empty SystemPrompt (regression guard for the refusal bug: an image with no system turn causes a small VLM to refuse)")
 	}
 }
 

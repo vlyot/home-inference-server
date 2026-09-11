@@ -543,18 +543,25 @@ func TranslateInferRequest(req api.InferRequest, requestID string) backend.Reque
 				imageData = decoded
 			}
 		}
-		if req.SystemPrompt != "" {
-			prompt = req.SystemPrompt + "\n\n" + prompt
-		}
 	}
 
 	return backend.Request{
-		CorrelationID:  req.CorrelationID,
-		RequestID:      requestID,
-		Modality:       backend.ModalityKind(req.Modality),
-		Prompt:         prompt,
-		Messages:       messages,
-		ImageData:      imageData,
+		CorrelationID: req.CorrelationID,
+		RequestID:     requestID,
+		Modality:      backend.ModalityKind(req.Modality),
+		Prompt:        prompt,
+		Messages:      messages,
+		ImageData:     imageData,
+		// SystemPrompt is threaded through as a real {role: "system"} chat
+		// turn (see chatShape) rather than concatenated into the prompt text
+		// for a vision request — llama-server's chat template only
+		// recognises an actual system-role message, and a vision request
+		// with no system turn at all is prone to the small-VLM "I cannot see
+		// images" refusal. TextInput.Prompt above still concatenates because
+		// a bare text prompt without Messages or an image takes the plain
+		// /completion endpoint, which has no chat template and no
+		// system-role concept to target.
+		SystemPrompt:   req.SystemPrompt,
 		MaxTokens:      req.MaxTokens,
 		Temperature:    req.Temperature,
 		Priority:       req.Priority,

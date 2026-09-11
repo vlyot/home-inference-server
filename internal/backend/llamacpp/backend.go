@@ -247,14 +247,29 @@ func (b *Backend) runCompleteStream(ctx context.Context, baseURL string, req bac
 }
 
 // chatShape returns req unchanged when it already has Messages, and otherwise —
-// only if it carries an image — wraps its Prompt as a single user turn so the
+// only if it carries an image — wraps its Prompt as a chat message list so the
 // chat/completions (--mmproj) path is used. A prompt-only text request is left
 // alone so it still takes the plain /completion endpoint.
+//
+// A non-empty SystemPrompt is prepended as its own {role: "system"} turn
+// rather than concatenated into the user turn's text: llama-server's jinja
+// chat template (the model's own GGUF-embedded template, used by default)
+// only recognises a real system-role message, and a small vision-language
+// model given an image with no system turn at all tends to fall back to a
+// generic "I cannot see images" text-completion refusal instead of answering
+// — a known small-VLM failure mode, not a wording problem in the user prompt.
 func chatShape(req backend.Request) backend.Request {
 	if len(req.Messages) > 0 || len(req.ImageData) == 0 {
 		return req
 	}
-	req.Messages = []backend.Message{{Role: "user", Content: req.Prompt}}
+	if req.SystemPrompt != "" {
+		req.Messages = []backend.Message{
+			{Role: "system", Content: req.SystemPrompt},
+			{Role: "user", Content: req.Prompt},
+		}
+	} else {
+		req.Messages = []backend.Message{{Role: "user", Content: req.Prompt}}
+	}
 	return req
 }
 

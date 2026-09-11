@@ -37,9 +37,18 @@ type Request struct {
 	// completions and vision.
 	Messages []Message
 	// ImageData is the decoded image bytes for vision requests. Nil for text.
-	ImageData   []byte
-	MaxTokens   int
-	Temperature float32
+	ImageData []byte
+	// SystemPrompt, when set, becomes a leading {role: "system"} turn on the
+	// chat-completions path (Messages, or a bare Prompt/ImageData promoted to
+	// chat shape by chatShape). Ignored on the plain /completion path (no
+	// Messages, no ImageData), which has no chat template and therefore no
+	// system-role concept. A caller that already supplies Messages with its
+	// own leading system turn should leave this empty — see
+	// translateMessages, which prepends SystemPrompt only when the caller
+	// didn't already provide one.
+	SystemPrompt string
+	MaxTokens    int
+	Temperature  float32
 	// Priority is the caller-supplied urgency ("high", "normal", "low").
 	// Empty string is treated as "normal".
 	Priority string

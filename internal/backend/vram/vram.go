@@ -144,18 +144,26 @@ func (b *Backend) Modality() backend.ModalityKind { return b.modality }
 
 func (b *Backend) Ready() bool { return true }
 
+// describeSystemPrompt is the standard Qwen2.5-VL system framing (matches the
+// model card's and every reference llama.cpp/vLLM invocation's usage). Root
+// cause of the earlier refusal bug: this server sent vision requests with no
+// system-role turn at all — chatShape wrapped the prompt as a single bare
+// user turn, so the model's jinja chat template had nothing establishing it
+// as an image-capable assistant, and a small VLM given an image with no
+// system turn tends to fall back to a generic "I cannot see images"
+// text-completion refusal. A wording change to the user prompt alone
+// ("you can see this image clearly...") only reduced the refusal rate via
+// sampling luck (confirmed unreliable: refused ~50% in production, and
+// deterministically at temperature 0) — the missing system turn was the
+// actual defect, not the prompt's phrasing.
+const describeSystemPrompt = "You are a helpful assistant."
+
 // describePrompt asks the loaded vision-capable tier for a literal, exhaustive
-// description. Measured on the GPU: an open-ended "list everything in this
-// image" / "describe this image" phrasing reliably makes Qwen2.5-VL-3B-Instruct
-// (Q4_K_M) refuse with "I cannot see images" even though it correctly answers
-// specific questions about the same image — a known small-VLM failure mode
-// where a broad description request pattern-matches text-only training data.
-// Explicitly asserting "you can see this image clearly" up front reliably
-// avoids the refusal; verified across repeated runs and multiple images.
-const describePrompt = `You can see this image clearly. Describe it factually: ` +
-	`its dominant colours, every object and where it is, any visible text or ` +
-	`numbers exactly as written, people and what they are doing, and the ` +
-	`overall composition. Be specific and exhaustive, not interpretive.`
+// description.
+const describePrompt = `Describe this image factually: its dominant colours, ` +
+	`every object and where it is, any visible text or numbers exactly as ` +
+	`written, people and what they are doing, and the overall composition. ` +
+	`Be specific and exhaustive, not interpretive.`
 
 // describeMaxTokens caps a Describe call's output.
 const describeMaxTokens = 512
@@ -167,9 +175,10 @@ const describeMaxTokens = 512
 // server.Describer.
 func (b *Backend) Describe(ctx context.Context, imageData []byte) (description, modelTier string, err error) {
 	resp, err := b.Infer(ctx, backend.Request{
-		Prompt:    describePrompt,
-		ImageData: imageData,
-		MaxTokens: describeMaxTokens,
+		Prompt:       describePrompt,
+		SystemPrompt: describeSystemPrompt,
+		ImageData:    imageData,
+		MaxTokens:    describeMaxTokens,
 	})
 	if err != nil {
 		return "", "", err

@@ -1085,13 +1085,14 @@ mmproj 805 MB + KV/compute overhead) — a real, but request-scoped, cost.</p>
 vision-mode footprint doesn't fit, the request returns <code>503 overloaded</code>
 rather than silently answering on a tier that can't see the image. Extreme
 pressure (&lt; 500 MB VRAM AND &gt; 90% CPU) defers like a text request.</p>
-<p><b>Model quality note:</b> Qwen2.5-VL-3B reliably answers <em>specific</em>
-questions about an image ("what colour is this", "what does this sign say") but
-can refuse ("I cannot see images") on a broad, unscoped "describe this image"
-prompt — a known small-VLM quirk. <code>POST /v1/describe</code>'s internal
-prompt is worded to avoid this (see below); a caller writing their own
-open-ended vision prompt should ask a specific question rather than a generic
-one.</p>
+<p><b>Model quality note:</b> Qwen2.5-VL-3B reliably answers questions — specific
+or open-ended — about a real photo. It can occasionally refuse ("I cannot see
+the image") when given a flat, textureless, single-colour image with no
+photographic content — an out-of-distribution input for the vision encoder,
+not a prompt-wording issue. This has no practical effect on real-world use
+(photos, screenshots, diagrams all have the texture/structure the encoder
+expects); it only shows up on synthetic test fixtures like a solid-colour
+placeholder image.</p>
 <p>Multimodal support is <em>per-tier</em>, not a separate backend type: a future
 audio-capable model would extend the same tier the same way (a second
 conditionally-loaded projector), not add a new orchestration layer.</p>
