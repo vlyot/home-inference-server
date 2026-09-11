@@ -689,7 +689,7 @@ func TestSelectAdmitsStrongViaPartialSplitUnderPressure(t *testing.T) {
 	b := New(backend.ModalityKindText, testRoster(), mock, stubInners(0), fastOpts())
 	defer b.Shutdown(context.Background())
 
-	desc, err := b.selectAndLoad(context.Background(), nil)
+	desc, err := b.selectAndLoad(context.Background(), nil, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -982,9 +982,9 @@ func TestEffectiveHeadroomFitsMatchesInlineFormula(t *testing.T) {
 		{availRaw: 2000, layers: 16, slots: 1},
 	}
 	for _, c := range cases {
-		resident := GPUResidentMB(d.RequiredVRAMMB, ScaledKVOverheadMB(*d, c.slots), c.layers, d.TotalLayers)
+		resident := GPUResidentMB(d.RequiredVRAMMB, ScaledKVOverheadMB(*d, c.slots, false), c.layers, d.TotalLayers)
 		want := fitsWithBuffer(resident, c.availRaw+resident, 10)
-		got := effectiveHeadroomFits(d, c.layers, c.slots, c.availRaw, 10)
+		got := effectiveHeadroomFits(d, c.layers, false, c.slots, c.availRaw, 10)
 		if got != want {
 			t.Errorf("availRaw=%d layers=%d slots=%d: effectiveHeadroomFits=%v; inline=%v", c.availRaw, c.layers, c.slots, got, want)
 		}
@@ -1172,5 +1172,241 @@ func TestStopInner_ReturnsShutdownError(t *testing.T) {
 	}
 	if got := stopInner(&erroringInner{shutdownErr: nil}); got != nil {
 		t.Fatalf("stopInner with clean Shutdown = %v; want nil", got)
+	}
+}
+
+// --- Vision mode ---
+
+// visionAwareStub is a backend.Backend that also implements gpuLayerSink and
+// visionSink, so tests can observe what loadModel pushes to it before a spawn
+// — mirroring what *llamacpp.Backend does in production.
+type visionAwareStub struct {
+	mu          sync.Mutex
+	shutdowns   int
+	lastVision  bool
+	visionCalls int
+}
+
+func (v *visionAwareStub) Modality() backend.ModalityKind { return backend.ModalityKindText }
+func (v *visionAwareStub) Ready() bool                    { return true }
+func (v *visionAwareStub) Infer(_ context.Context, req backend.Request) (backend.Response, error) {
+	return backend.Response{Output: "ok", TokPerSecSample: 10}, nil
+}
+func (v *visionAwareStub) Shutdown(context.Context) error {
+	v.mu.Lock()
+	v.shutdowns++
+	v.mu.Unlock()
+	return nil
+}
+func (v *visionAwareStub) SetNextGPULayers(int) {}
+func (v *visionAwareStub) SetNextNeedsVision(needsVision bool) {
+	v.mu.Lock()
+	v.lastVision = needsVision
+	v.visionCalls++
+	v.mu.Unlock()
+}
+func (v *visionAwareStub) snapshot() (shutdowns, visionCalls int, lastVision bool) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.shutdowns, v.visionCalls, v.lastVision
+}
+
+// visionRoster is a 3-tier roster where only weak has a vision variant,
+// mirroring the real weak-tier-only vision deployment.
+func visionRoster() []types.ModelDescriptor {
+	return []types.ModelDescriptor{
+		{
+			TierLabel: types.TierWeak, Name: "weak-vl", RequiredVRAMMB: 1000,
+			MMProjPath: "mmproj.gguf", TotalLayers: 32,
+			KVCacheMB: 100, KVFixedMB: 200,
+			VisionRequiredVRAMMB: 1000, VisionKVCacheMB: 100, VisionKVFixedMB: 800,
+		},
+		{TierLabel: types.TierMid, Name: "mid-model", RequiredVRAMMB: 3000, KVCacheMB: 200, KVFixedMB: 400, TotalLayers: 32},
+		{TierLabel: types.TierStrong, Name: "strong-model", RequiredVRAMMB: 6000, KVCacheMB: 300, KVFixedMB: 600, TotalLayers: 32},
+	}
+}
+
+func visionInners() (map[types.ModelTierLabel]backend.Backend, *visionAwareStub) {
+	weak := &visionAwareStub{}
+	return map[types.ModelTierLabel]backend.Backend{
+		types.TierWeak:   weak,
+		types.TierMid:    &visionAwareStub{},
+		types.TierStrong: &visionAwareStub{},
+	}, weak
+}
+
+func TestSelectInner_TextRequest_IgnoresVisionOnlyConstants(t *testing.T) {
+	inners, weak := visionInners()
+	mock := &MockVRAMProvider{FreeMB: 10000}
+	b := New(backend.ModalityKindText, visionRoster(), mock, inners, fastOpts())
+	defer b.Shutdown(context.Background())
+
+	desc, _, err := b.selectInner(context.Background(), backend.Request{Prompt: "hi", PreferredTier: "weak"}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if desc.TierLabel != types.TierWeak {
+		t.Fatalf("tier = %q; want weak (pinned)", desc.TierLabel)
+	}
+	if b.loadedVision {
+		t.Error("loadedVision = true for a text request; want false")
+	}
+	_, calls, lastVision := weak.snapshot()
+	if calls != 1 || lastVision {
+		t.Errorf("SetNextNeedsVision calls=%d lastVision=%v; want 1 call with false", calls, lastVision)
+	}
+}
+
+func TestSelectInner_VisionRequest_RestrictsToVisionCapableTiers(t *testing.T) {
+	inners, _ := visionInners()
+	// Ample VRAM: without the vision restriction, strong (largest) would win.
+	mock := &MockVRAMProvider{FreeMB: 10000}
+	b := New(backend.ModalityKindText, visionRoster(), mock, inners, fastOpts())
+	defer b.Shutdown(context.Background())
+
+	desc, _, err := b.selectInner(context.Background(), backend.Request{ImageData: []byte{1}}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if desc.TierLabel != types.TierWeak {
+		t.Fatalf("tier = %q; want weak (the only HasVision() tier)", desc.TierLabel)
+	}
+	if !b.loadedVision {
+		t.Error("loadedVision = false after a vision load; want true")
+	}
+}
+
+func TestSelectInner_VisionRequest_NoVisionTierFits_ReturnsOverloaded(t *testing.T) {
+	inners, _ := visionInners()
+	// Too little VRAM even for weak's vision-mode CPU-only overhead (1000).
+	mock := &MockVRAMProvider{FreeMB: 50}
+	b := New(backend.ModalityKindText, visionRoster(), mock, inners, fastOpts())
+	defer b.Shutdown(context.Background())
+
+	_, _, err := b.selectInner(context.Background(), backend.Request{ImageData: []byte{1}}, nil)
+	be := &backend.BackendError{}
+	if !errors.As(err, &be) || be.Code != "overloaded" {
+		t.Fatalf("err = %v; want overloaded", err)
+	}
+}
+
+func TestSelectInner_PreferredTierVisionRequest_NonVisionTier_Returns400(t *testing.T) {
+	inners, _ := visionInners()
+	mock := &MockVRAMProvider{FreeMB: 10000}
+	b := New(backend.ModalityKindText, visionRoster(), mock, inners, fastOpts())
+	defer b.Shutdown(context.Background())
+
+	_, _, err := b.selectInner(context.Background(), backend.Request{ImageData: []byte{1}, PreferredTier: "mid"}, nil)
+	be := &backend.BackendError{}
+	if !errors.As(err, &be) || be.Code != "invalid_request" {
+		t.Fatalf("err = %v; want invalid_request", err)
+	}
+}
+
+func TestSelectAndLoad_ModeSwitchForcesEvictAndReload(t *testing.T) {
+	inners, weak := visionInners()
+	mock := &MockVRAMProvider{FreeMB: 10000}
+	b := New(backend.ModalityKindText, visionRoster(), mock, inners, fastOpts())
+	defer b.Shutdown(context.Background())
+
+	// Load weak in text mode.
+	if _, err := b.selectAndLoad(context.Background(), &types.ModelDescriptor{TierLabel: types.TierWeak}, false); err != nil {
+		t.Fatalf("text load: %v", err)
+	}
+	if b.loadedVision {
+		t.Fatal("loadedVision = true after a text load")
+	}
+
+	// A vision request for the same tier must evict + reload in vision mode.
+	if _, err := b.selectAndLoad(context.Background(), &types.ModelDescriptor{TierLabel: types.TierWeak}, true); err != nil {
+		t.Fatalf("vision load: %v", err)
+	}
+	if !b.loadedVision {
+		t.Fatal("loadedVision = false after a vision load; want true")
+	}
+	shutdowns, calls, lastVision := weak.snapshot()
+	if shutdowns != 1 {
+		t.Errorf("shutdowns = %d; want 1 (evicted once for the mode switch)", shutdowns)
+	}
+	if calls != 2 || !lastVision {
+		t.Errorf("SetNextNeedsVision calls=%d lastVision=%v; want 2 calls, last true", calls, lastVision)
+	}
+}
+
+func TestSelectAndLoad_WarmVisionModeReusedForSecondVisionRequest(t *testing.T) {
+	inners, weak := visionInners()
+	mock := &MockVRAMProvider{FreeMB: 10000}
+	b := New(backend.ModalityKindText, visionRoster(), mock, inners, fastOpts())
+	defer b.Shutdown(context.Background())
+
+	if _, err := b.selectAndLoad(context.Background(), &types.ModelDescriptor{TierLabel: types.TierWeak}, true); err != nil {
+		t.Fatalf("first vision load: %v", err)
+	}
+	if _, err := b.selectAndLoad(context.Background(), &types.ModelDescriptor{TierLabel: types.TierWeak}, true); err != nil {
+		t.Fatalf("second vision load: %v", err)
+	}
+	shutdowns, _, _ := weak.snapshot()
+	if shutdowns != 0 {
+		t.Errorf("shutdowns = %d; want 0 (warm vision-mode tier reused, no reload)", shutdowns)
+	}
+}
+
+func TestEffectiveHeadroomFits_UsesLoadedVisionFlagForResidentEstimate(t *testing.T) {
+	d := &types.ModelDescriptor{
+		RequiredVRAMMB: 1000, KVCacheMB: 100, KVFixedMB: 200, TotalLayers: 32,
+		MMProjPath:           "mmproj.gguf",
+		VisionRequiredVRAMMB: 1000, VisionKVCacheMB: 100, VisionKVFixedMB: 3000,
+	}
+	// effectiveHeadroomFits checks resident*bufferPct% <= availRaw (the
+	// resident amount itself is credited back into availRaw either way — see
+	// fitsWithBuffer). Full-GPU resident: text = 1000+300=1300 (10% = 130);
+	// vision = 1000+3100=4100 (10% = 410). At availRaw=200 the text margin
+	// fits but the (much larger) vision margin does not.
+	textFits := effectiveHeadroomFits(d, -1, false, 1, 200, 10)
+	visionFits := effectiveHeadroomFits(d, -1, true, 1, 200, 10)
+	if !textFits {
+		t.Error("text mode's smaller resident footprint should fit at availRaw=200")
+	}
+	if visionFits {
+		t.Error("vision mode's larger resident footprint (4100 MB) should NOT fit at availRaw=200")
+	}
+}
+
+func TestDescribe_RoutesThroughNormalSelectAndLoad(t *testing.T) {
+	inners, weak := visionInners()
+	mock := &MockVRAMProvider{FreeMB: 10000}
+	b := New(backend.ModalityKindText, visionRoster(), mock, inners, fastOpts())
+	defer b.Shutdown(context.Background())
+
+	desc, tier, err := b.Describe(context.Background(), []byte{1, 2, 3})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if desc != "ok" {
+		t.Errorf("description = %q; want the inner backend's Output", desc)
+	}
+	if tier != string(types.TierWeak) {
+		t.Errorf("tier = %q; want weak", tier)
+	}
+	if !b.loadedVision {
+		t.Error("Describe should have loaded the weak tier in vision mode")
+	}
+	_, calls, lastVision := weak.snapshot()
+	if calls == 0 || !lastVision {
+		t.Errorf("SetNextNeedsVision calls=%d lastVision=%v; want at least 1 call, true", calls, lastVision)
+	}
+}
+
+func TestDescribe_PropagatesBackendError(t *testing.T) {
+	inners, _ := visionInners()
+	// No VRAM at all: even weak's vision-mode CPU-only overhead won't fit.
+	mock := &MockVRAMProvider{FreeMB: 10}
+	b := New(backend.ModalityKindText, visionRoster(), mock, inners, fastOpts())
+	defer b.Shutdown(context.Background())
+
+	_, _, err := b.Describe(context.Background(), []byte{1})
+	be := &backend.BackendError{}
+	if !errors.As(err, &be) || be.Code != "overloaded" {
+		t.Fatalf("err = %v; want overloaded, got %v", be, err)
 	}
 }

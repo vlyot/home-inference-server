@@ -47,6 +47,23 @@ type ModelDescriptor struct {
 	// KVFixedMB is the non-weight VRAM cost that does NOT scale with --parallel:
 	// compute buffers plus the CUDA context. Read from llama-server startup logs.
 	KVFixedMB int64 `json:"kv_fixed_mb"`
+
+	// VisionRequiredVRAMMB, VisionKVCacheMB and VisionKVFixedMB are this
+	// descriptor's counterparts for a load spawned WITH --mmproj (an image
+	// present in the request). They are independent of the text-mode fields
+	// above — for most models the weight is identical either way and only the
+	// KV/fixed terms grow (the mmproj's own GPU-resident cost lives in
+	// VisionKVFixedMB), but keeping them separate means a re-quantized vision
+	// variant can differ in weight size too. Zero/unset alongside an empty
+	// MMProjPath for a text-only tier.
+	VisionRequiredVRAMMB int64 `json:"vision_required_vram_mb,omitempty"`
+	VisionKVCacheMB      int64 `json:"vision_kv_cache_mb,omitempty"`
+	VisionKVFixedMB      int64 `json:"vision_kv_fixed_mb,omitempty"`
+}
+
+// HasVision reports whether this tier has a vision-capable (--mmproj) variant.
+func (d ModelDescriptor) HasVision() bool {
+	return d.MMProjPath != ""
 }
 
 // KVParts returns the descriptor's per-slot KV-cache cost and its fixed
@@ -58,4 +75,19 @@ func (d ModelDescriptor) KVParts() (cacheMB, fixedMB int64) {
 		return d.KVCacheMB, d.KVFixedMB
 	}
 	return d.KVOverheadMB, 0
+}
+
+// VisionKVParts is KVParts' counterpart for a load spawned WITH --mmproj.
+func (d ModelDescriptor) VisionKVParts() (cacheMB, fixedMB int64) {
+	return d.VisionKVCacheMB, d.VisionKVFixedMB
+}
+
+// WeightMB returns the GPU-resident weight footprint for the given mode:
+// VisionRequiredVRAMMB when needsVision and this tier has a vision variant,
+// RequiredVRAMMB otherwise.
+func (d ModelDescriptor) WeightMB(needsVision bool) int64 {
+	if needsVision && d.HasVision() {
+		return d.VisionRequiredVRAMMB
+	}
+	return d.RequiredVRAMMB
 }

@@ -18,7 +18,6 @@ import (
 	"github.com/ngkaichong/home-inference-server/assets"
 	"github.com/ngkaichong/home-inference-server/backend"
 	"github.com/ngkaichong/home-inference-server/internal/backend/llamacpp"
-	"github.com/ngkaichong/home-inference-server/internal/backend/pipeline"
 	"github.com/ngkaichong/home-inference-server/internal/backend/stub"
 	"github.com/ngkaichong/home-inference-server/internal/backend/vram"
 	"github.com/ngkaichong/home-inference-server/internal/batcher"
@@ -79,35 +78,41 @@ const llamaExe = `C:\llama\llama-server.exe`
 // constant) split from the old single KVOverheadMB — the cache portion is the
 // ctx-proportional part, roughly two thirds. Tighten from slog.Debug
 // llama-server startup lines on the GPU.
+//
+// Every tier is a text.Backend; a tier whose MMProjPath is set (currently only
+// weak) ALSO accepts modality: "vision" requests — vram.Backend restricts
+// vision selection to HasVision() tiers and spawns that tier's subprocess with
+// --mmproj only for the request that actually needs it (see
+// types.ModelDescriptor.WeightMB / VisionKVParts and
+// llamacpp.Backend.SetNextNeedsVision). There is no separate vision-only
+// roster or backend.
 var defaultRoster = []types.ModelDescriptor{
 	{
-		TierLabel:      types.TierWeak,
-		Name:           "smolvlm2-2.2b-q4_k_m",
-		FilePath:       `models\smolvlm2-2.2b-q4_k_m.gguf`,
-		MMProjPath:     `models\smolvlm2-2.2b-mmproj-q8_0.gguf`,
-		RequiredVRAMMB: 1061, // Q4_K_M text weights, measured file size
-		Modality:       "vision",
-		TotalLayers:    24, // llama.block_count from the GGUF metadata
-		// Measured on the GPU: nvidia-smi showed ~2512 MB resident during a
-		// --mmproj load (weights 1061 + mmproj/KV/compute-buffer overhead
-		// ~1451, vs. the earlier 500M-tier's 260 MB overhead — the Q8_0 mmproj
-		// itself is 565 MB and rides on GPU alongside the text weights).
-		// KVFixedMB carries the non-scaling remainder; --parallel is 1 for
-		// this tier so KVCacheMB's per-slot scaling doesn't matter here yet.
-		KVCacheMB: 220,
-		KVFixedMB: 1231,
-		Port:      8094,
-	},
-	{
-		TierLabel:      types.TierWeak,
-		Name:           "qwen2.5-3b-instruct",
-		FilePath:       `models\qwen2.5-3b-instruct-q4_k_m.gguf`,
-		RequiredVRAMMB: 1930,
+		TierLabel: types.TierWeak,
+		Name:      "qwen2.5-vl-3b-instruct",
+		FilePath:  `models\qwen2.5-vl-3b-instruct-q4_k_m.gguf`,
+		// MMProjPath makes this tier vision-capable. It is passed to
+		// llama-server ONLY on a load that a vision request triggers
+		// (llamacpp.Backend.ensureRunning consults SetNextNeedsVision) — a
+		// plain text load never touches --mmproj or the VRAM it costs. See
+		// HasVision(), WeightMB(), VisionKVParts().
+		MMProjPath:     `models\mmproj-qwen2.5-vl-3b-instruct-q8_0.gguf`,
+		RequiredVRAMMB: 1840, // Q4_K_M text weights, measured file size
 		Modality:       "text",
-		TotalLayers:    36,
+		TotalLayers:    36, // qwen2vl.block_count from the GGUF metadata
 		KVCacheMB:      320,
 		KVFixedMB:      180,
-		Port:           8093,
+		// Vision-mode constants: same weights (native Qwen2.5-VL, no separate
+		// vision checkpoint) plus the ~805 MB mmproj and its own compute
+		// buffers. Measured on the GPU: a full-GPU vision load's estimate
+		// (weight 1840 + KVFixedMB 1600 + KVCacheMB*2 slots = 4080) tracked a
+		// real nvidia-smi peak of ~5000 MB including the ~1760 MB idle
+		// baseline (~3240 MB resident) — conservative in the safe direction
+		// (over-, not under-, booked). See roadmap.md for the full run.
+		VisionRequiredVRAMMB: 1840,
+		VisionKVCacheMB:      320,
+		VisionKVFixedMB:      1600,
+		Port:                 8093,
 	},
 	{
 		TierLabel:      types.TierMid,
@@ -163,16 +168,6 @@ func main() {
 
 	nvmlProvider := vram.NVMLProvider{}
 
-	// Split roster by modality; each backend only manages its own models.
-	var textRoster, visionRoster []types.ModelDescriptor
-	for _, desc := range defaultRoster {
-		if desc.Modality == "vision" {
-			visionRoster = append(visionRoster, desc)
-		} else {
-			textRoster = append(textRoster, desc)
-		}
-	}
-
 	// vramProvider is what the tier-selection logic queries for headroom. In stub
 	// mode it is a fixed, ample value so the pipeline (queue → batcher → router →
 	// vram.Backend → inner) runs end to end without a GPU.
@@ -181,44 +176,31 @@ func main() {
 		vramProvider = &vram.MockVRAMProvider{FreeMB: 8000}
 	}
 
-	// Build the text tier inners keyed by tier label, one per roster entry.
-	// Vision is served by a single backend (see below), not a tiered vram.Backend.
+	// Build one inner backend per roster entry, keyed by tier label. A tier
+	// whose MMProjPath is set (HasVision()) serves both modalities through the
+	// same subprocess identity — vram.Backend decides per-request whether to
+	// spawn it with --mmproj (see SetNextNeedsVision).
 	var llamaInners []*llamacpp.Backend
-	textInners := make(map[types.ModelTierLabel]backend.Backend, len(textRoster))
+	inners := make(map[types.ModelTierLabel]backend.Backend, len(defaultRoster))
 	if flagBackend == "stub" {
-		for _, desc := range textRoster {
-			textInners[desc.TierLabel] = stub.New(backend.ModalityKindText, 0)
+		for _, desc := range defaultRoster {
+			inners[desc.TierLabel] = stub.New(backend.ModalityKindText, 0)
 		}
 		slog.Warn("running with the STUB inference backend — responses are fake")
 	} else {
-		for _, desc := range textRoster {
+		for _, desc := range defaultRoster {
 			lb := llamacpp.New(backend.ModalityKindText, desc, llamaExe, nvmlProvider, maxParallel)
-			textInners[desc.TierLabel] = lb
+			inners[desc.TierLabel] = lb
 			llamaInners = append(llamaInners, lb)
 		}
 	}
 
-	// The SmolVLM2 vision-perception subprocess. It is not part of a tiered
-	// vram.Backend — the pipeline runs it once per vision request, then evicts
-	// it before the Gemma reasoning hop, so the two are never co-resident.
-	// visionInner stays nil in stub mode.
-	var visionInner *llamacpp.Backend
-	if flagBackend != "stub" && len(visionRoster) > 0 {
-		visionInner = llamacpp.New(backend.ModalityKindVision, visionRoster[0], llamaExe, nvmlProvider, 1)
-	}
-
 	// Reaper kills any stray llama-server left on a roster port by a previous
-	// crash or a failed eviction. "owned" is the live set of our subprocess PIDs
-	// (the text tiers plus the vision-perception subprocess).
+	// crash or a failed eviction. "owned" is the live set of our subprocess PIDs.
 	reaper := vram.NewReaper(rosterPorts, func() map[int]bool {
-		owned := make(map[int]bool, len(llamaInners)+1)
+		owned := make(map[int]bool, len(llamaInners))
 		for _, lb := range llamaInners {
 			if pid := lb.RunningPID(); pid != 0 {
-				owned[pid] = true
-			}
-		}
-		if visionInner != nil {
-			if pid := visionInner.RunningPID(); pid != 0 {
 				owned[pid] = true
 			}
 		}
@@ -241,31 +223,11 @@ func main() {
 		opts.Reaper = reaper
 	}
 
-	vramBackend := vram.New(backend.ModalityKindText, textRoster, vramProvider, textInners, opts)
-
-	// Vision: a SmolVLM2 → Gemma caption-then-reason pipeline. SmolVLM2 (the
-	// perceive stage) produces an exhaustive image description, is evicted, then
-	// the shared text vram.Backend does the actual reasoning — so tier cascade,
-	// speed floors and deferral apply to the reasoning hop for free, and the two
-	// models are never resident together. In stub mode a single fake backend
-	// stands in.
-	var visionBackend backend.Backend
-	var pipeVision *pipeline.Backend // typed handle for srv.SetDescriber; nil in stub mode
-	if flagBackend == "stub" {
-		visionBackend = stub.New(backend.ModalityKindVision, 0)
-	} else {
-		pipeVision = pipeline.New(visionInner, vramBackend, pipeline.Spec{
-			Modality:             backend.ModalityKindVision,
-			PerceptionPrompt:     pipeline.VisionPerceptionPrompt,
-			ReasonSystemPrompt:   pipeline.VisionReasonSystemPrompt,
-			DescriptionMaxTokens: 512,
-		})
-		visionBackend = pipeVision
-	}
+	vramBackend := vram.New(backend.ModalityKindText, defaultRoster, vramProvider, inners, opts)
 
 	backends := map[backend.ModalityKind]backend.Backend{
 		backend.ModalityKindText:   vramBackend,
-		backend.ModalityKindVision: visionBackend,
+		backend.ModalityKindVision: vramBackend, // same instance — selectInner branches on req.ImageData
 	}
 
 	r := router.New(backends)
@@ -325,7 +287,7 @@ func main() {
 		srv.SetDescriber(stubDescriber{})
 	} else {
 		srv.SetTokenizer(vramBackend)
-		srv.SetDescriber(pipeVision)
+		srv.SetDescriber(vramBackend)
 	}
 	srv.SetLogSource(logBuf)
 	if inferTOMS := envInt("HIS_INFER_TIMEOUT_MS", 0); inferTOMS > 0 {
@@ -433,8 +395,7 @@ func main() {
 		slog.Error("http shutdown error", "err", err)
 	}
 
-	vramBackend.Shutdown(shutdownCtx)   //nolint:errcheck
-	visionBackend.Shutdown(shutdownCtx) //nolint:errcheck — evicts the SmolVLM2 subprocess if one is running
+	vramBackend.Shutdown(shutdownCtx) //nolint:errcheck
 	q.Close()
 	slog.Info("server stopped", slog.String(logschema.FieldEvent, string(logschema.EventServerStop)))
 

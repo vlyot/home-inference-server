@@ -53,6 +53,13 @@ type Backend struct {
 	// When nextGPULayersSet is false, ensureRunning falls back to ComputeGPULayers.
 	nextGPULayers    int
 	nextGPULayersSet bool
+	// nextNeedsVision is whether the NEXT spawn should run WITH --mmproj, set by
+	// vram.Backend (via SetNextNeedsVision) before every Infer/InferStream.
+	// runningWithVision is which mode the CURRENTLY RUNNING subprocess (if any)
+	// was actually spawned with. ensureRunning compares the two and forces an
+	// evict + respawn on mismatch.
+	nextNeedsVision   bool
+	runningWithVision bool
 
 	// Rolling tok/sec average over the last tokRingSize completions.
 	tokRing [tokRingSize]float64
@@ -87,6 +94,18 @@ func (b *Backend) SetNextGPULayers(n int) {
 	b.mu.Lock()
 	b.nextGPULayers = n
 	b.nextGPULayersSet = true
+	b.mu.Unlock()
+}
+
+// SetNextNeedsVision records whether the next spawn should run WITH --mmproj
+// (true) or without it (false). Called by vram.Backend before every
+// Infer/InferStream so ensureRunning can tell whether the CURRENTLY RUNNING
+// subprocess (if any) already matches — a mismatch forces an evict + respawn
+// before the request is served. Takes effect on the next ensureRunning call,
+// not a running process.
+func (b *Backend) SetNextNeedsVision(v bool) {
+	b.mu.Lock()
+	b.nextNeedsVision = v
 	b.mu.Unlock()
 }
 
@@ -458,26 +477,44 @@ func probeHealthy(ctx context.Context, baseURL string) bool {
 	return resp.StatusCode == http.StatusOK
 }
 
-// ensureRunning starts the subprocess if it is not already running.
-// Returns the base URL to use for HTTP requests. b.mu is held only for the
-// short state checks/writes; the slow proc.Start runs under startMu with b.mu
-// released, so status accessors stay responsive during a cold load.
+// ensureRunning starts the subprocess if it is not already running, or
+// restarts it if the running process was spawned in the wrong mode (with or
+// without --mmproj) for what the next request needs. Returns the base URL to
+// use for HTTP requests. b.mu is held only for the short state checks/writes;
+// the slow proc.Start runs under startMu with b.mu released, so status
+// accessors stay responsive during a cold load.
 func (b *Backend) ensureRunning(ctx context.Context) (string, error) {
 	b.mu.Lock()
 	if b.ready {
 		proc, baseURL := b.proc, b.baseURL
+		modeMismatch := b.runningWithVision != b.nextNeedsVision
 		b.mu.Unlock()
-		// A live proc handle plus a ready flag can still point at a dead
-		// subprocess if it was killed out from under us. Probe before trusting.
-		if proc == nil || probeHealthy(ctx, baseURL) {
+
+		if modeMismatch {
+			slog.Info("llamacpp: vision mode changed, restarting subprocess",
+				slog.String(logschema.FieldModelTier, string(b.desc.TierLabel)),
+			)
+			if proc != nil {
+				stopCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+				_ = proc.Stop(stopCtx)
+				cancel()
+			}
+			b.mu.Lock()
+			b.ready = false
+			b.proc = nil
+			b.residentMB = 0
+		} else if proc == nil || probeHealthy(ctx, baseURL) {
+			// A live proc handle plus a ready flag can still point at a dead
+			// subprocess if it was killed out from under us. Probe before trusting.
 			return baseURL, nil
+		} else {
+			slog.Info("llamacpp: subprocess no longer healthy, reloading",
+				slog.String(logschema.FieldModelTier, string(b.desc.TierLabel)),
+			)
+			b.mu.Lock()
+			b.ready = false
+			b.proc = nil
 		}
-		slog.Info("llamacpp: subprocess no longer healthy, reloading",
-			slog.String(logschema.FieldModelTier, string(b.desc.TierLabel)),
-		)
-		b.mu.Lock()
-		b.ready = false
-		b.proc = nil
 	}
 	b.mu.Unlock()
 
@@ -485,14 +522,16 @@ func (b *Backend) ensureRunning(ctx context.Context) (string, error) {
 	b.startMu.Lock()
 	defer b.startMu.Unlock()
 
-	// Another goroutine may have completed the spawn while we waited on startMu.
+	// Another goroutine may have completed the spawn while we waited on startMu
+	// — but only if it landed in the mode this call still wants.
 	b.mu.Lock()
-	if b.ready {
+	if b.ready && b.runningWithVision == b.nextNeedsVision {
 		url := b.baseURL
 		b.mu.Unlock()
 		return url, nil
 	}
 	b.starting = true
+	needsVision := b.nextNeedsVision
 	b.mu.Unlock()
 	defer func() {
 		b.mu.Lock()
@@ -512,20 +551,25 @@ func (b *Backend) ensureRunning(ctx context.Context) (string, error) {
 		gpuLayers = -1
 		if b.vramp != nil {
 			if availMB, err := b.vramp.AvailableMB(); err == nil {
-				gpuLayers = vram.ComputeGPULayers(b.desc.RequiredVRAMMB, availMB)
+				gpuLayers = vram.ComputeGPULayers(b.desc.WeightMB(needsVision), availMB)
 			}
 		}
 	}
-	resident := vram.GPUResidentMB(b.desc.RequiredVRAMMB, vram.ScaledKVOverheadMB(b.desc, b.maxParallel), gpuLayers, b.desc.TotalLayers)
-	proc := newProcess(b.exe, b.desc.FilePath, b.desc.MMProjPath, string(b.desc.TierLabel), gpuLayers, port, b.maxParallel)
+	resident := vram.GPUResidentMB(b.desc.WeightMB(needsVision), vram.ScaledKVOverheadMB(b.desc, b.maxParallel, needsVision), gpuLayers, b.desc.TotalLayers)
+	mmprojPath := ""
+	if needsVision {
+		mmprojPath = b.desc.MMProjPath
+	}
+	proc := newProcess(b.exe, b.desc.FilePath, mmprojPath, string(b.desc.TierLabel), gpuLayers, port, b.maxParallel)
 
 	slog.Info("model loading",
 		slog.String(logschema.FieldEvent, string(logschema.EventModelLoading)),
 		slog.String(logschema.FieldModelTier, string(b.desc.TierLabel)),
-		slog.Int64(logschema.FieldVRAMRequiredMB, b.desc.RequiredVRAMMB),
+		slog.Int64(logschema.FieldVRAMRequiredMB, b.desc.WeightMB(needsVision)),
 		slog.Int("gpu_layers", gpuLayers),
 		slog.Int("total_layers", b.desc.TotalLayers),
 		slog.Int("parallel", b.maxParallel),
+		slog.Bool("vision", needsVision),
 		slog.Int64("vram_resident_mb", resident),
 	)
 
@@ -541,6 +585,7 @@ func (b *Backend) ensureRunning(ctx context.Context) (string, error) {
 	b.proc = proc
 	b.baseURL = fmt.Sprintf("http://127.0.0.1:%d", port)
 	b.ready = true
+	b.runningWithVision = needsVision
 	b.residentMB = resident
 	b.mu.Unlock()
 

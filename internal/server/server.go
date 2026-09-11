@@ -65,9 +65,10 @@ type Tokenizer interface {
 	NCtx(ctx context.Context) (int, error)
 }
 
-// Describer runs the vision perception hop only (image in, literal text
-// description out). Satisfied by *pipeline.Backend. Powers POST /v1/describe,
-// which the chat UI uses to fold an image into a text conversation.
+// Describer runs a one-shot vision request asking for a literal description
+// (image in, literal text out). Satisfied by *vram.Backend. Powers
+// POST /v1/describe, which the chat UI uses to fold an image into a text
+// conversation.
 type Describer interface {
 	Describe(ctx context.Context, imageData []byte) (description string, modelTier string, err error)
 }

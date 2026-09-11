@@ -210,11 +210,12 @@
   }'</code></pre>
 
 <h3>Vision (image → text)</h3>
-<p><code>modality: "vision"</code> is served by a two-stage pipeline: a small
-vision model (SmolVLM2 500M) produces an exhaustive literal description of the
-image, then a text tier answers your <code>prompt</code> over that description
-&mdash; see <a href="#vision-pipeline">How vision works</a> below. Send the image
-as <strong><code>image_base64</code></strong> (raw base64, no data-URI prefix).
+<p><code>modality: "vision"</code> is answered directly by the weak tier
+(<code>qwen2.5-vl-3b-instruct</code>), a natively multimodal model &mdash; it
+sees the image and your <code>prompt</code> together in one inference, no
+separate captioning hop. See <a href="#vision-mode">How vision works</a> below
+for how the server decides when to load the vision projector. Send the image as
+<strong><code>image_base64</code></strong> (raw base64, no data-URI prefix).
 <code>image_url</code> is <strong>not</strong> supported and returns
 <code>400</code>. <code>prompt</code> is required.</p>
 <pre><code>IMG=$(base64 -w0 photo.jpg)
@@ -228,8 +229,9 @@ curl -X POST http://localhost:8080/v1/infer \
     }
   }"</code></pre>
 <p>A vision request may also carry <code>response_format</code> (see
-<a href="#structured-output">Structured Output</a>) &mdash; the schema is applied
-to the reasoning stage, so you can ask for a JSON object describing the image.</p>
+<a href="#structured-output">Structured Output</a>) &mdash; the schema is
+applied to the same inference, so you can ask for a JSON object describing the
+image directly.</p>
 
 <h3 id="structured-output">Structured Output (JSON mode)</h3>
 <p>Add <code>response_format</code> to any request that uses
@@ -382,13 +384,13 @@ The client just parses <code>output</code> as JSON.</p>
       <td class="field-name">preferred_tier</td>
       <td class="field-type">string</td>
       <td class="field-default">"" (automatic)</td>
-      <td class="field-desc">Pins tier selection to exactly this tier instead of the default "largest tier that fits in free VRAM" — e.g. deliberately running the small model to leave VRAM headroom for other GPU work. Values: <code>"strong"</code> | <code>"mid"</code> | <code>"weak"</code>. Unlike <code>min_tier</code> (a floor, never upgraded away from), this is an exact pin: it evicts a larger already-loaded model if needed, and the speed-floor cascade never overrides it. An unrecognized value returns <code>400 invalid_request</code>. Backs the model-tier dropdown in the built-in Chat UI at <code>GET /chat</code>. For a <code>vision</code> request this pins the <em>reasoning</em> tier; the perception model (SmolVLM2) is fixed.</td>
+      <td class="field-desc">Pins tier selection to exactly this tier instead of the default "largest tier that fits in free VRAM" — e.g. deliberately running the small model to leave VRAM headroom for other GPU work. Values: <code>"strong"</code> | <code>"mid"</code> | <code>"weak"</code>. Unlike <code>min_tier</code> (a floor, never upgraded away from), this is an exact pin: it evicts a larger already-loaded model if needed, and the speed-floor cascade never overrides it. An unrecognized value returns <code>400 invalid_request</code>. Backs the model-tier dropdown in the built-in Chat UI at <code>GET /chat</code>. A <code>vision</code> request pinned to a tier with no vision support (<code>mid</code> or <code>strong</code>) returns <code>400 invalid_request</code> — see <a href="#vision-mode">How vision works</a>.</td>
     </tr>
     <tr>
       <td class="field-name">response_format</td>
       <td class="field-type">object</td>
       <td class="field-default">null (unconstrained)</td>
-      <td class="field-desc">Constrains output to a JSON shape. Forwarded verbatim to llama-server, which compiles it to a sampling grammar so the model cannot emit a non-conforming token. Accepts <code>{"type":"json_object"}</code> or <code>{"type":"json_schema","json_schema":{...}}</code> (OpenAI shape). <strong>Requires <code>text_input.messages</code></strong> — ignored on a prompt-only request. On a <code>vision</code> request it is applied to the reasoning stage. A schema llama-server cannot compile returns <code>400 {"code":"invalid_grammar"}</code>. See <a href="#structured-output">Structured Output</a>.</td>
+      <td class="field-desc">Constrains output to a JSON shape. Forwarded verbatim to llama-server, which compiles it to a sampling grammar so the model cannot emit a non-conforming token. Accepts <code>{"type":"json_object"}</code> or <code>{"type":"json_schema","json_schema":{...}}</code> (OpenAI shape). <strong>Requires <code>text_input.messages</code></strong> — ignored on a prompt-only request. Works on a <code>vision</code> request the same way — the schema constrains the model's answer about the image. A schema llama-server cannot compile returns <code>400 {"code":"invalid_grammar"}</code>. See <a href="#structured-output">Structured Output</a>.</td>
     </tr>
   </tbody>
 </table>
@@ -458,7 +460,7 @@ The client just parses <code>output</code> as JSON.</p>
     <tr>
       <td class="field-name">prompt</td>
       <td class="field-type">string</td>
-      <td class="field-desc">Required. The question or instruction about the image. This is answered by the reasoning stage over the perception model's description — see <a href="#vision-pipeline">How vision works</a>.</td>
+      <td class="field-desc">Required. The question or instruction about the image, answered directly by the vision-capable tier — see <a href="#vision-mode">How vision works</a>.</td>
     </tr>
   </tbody>
 </table>
@@ -685,7 +687,7 @@ The client just parses <code>output</code> as JSON.</p>
     <tr>
       <td class="field-name">POST /v1/describe</td>
       <td class="field-type">DescribeResponse</td>
-      <td class="field-desc">Body <code>{"image_base64": "..."}</code> → <code>{"description": "...", "model_tier": "weak"}</code>. Runs <strong>only</strong> the vision perception hop (SmolVLM2 loads, describes the image literally, evicts) — no reasoning tier is touched. Used by the built-in Chat UI to fold an image into a text conversation: it calls this on image attach, then inserts the returned description as a hidden context turn so every follow-up question is answered with the image in context, without re-running vision per turn. Bad base64 or an empty field → <code>400</code>; a cold-load timeout → <code>408</code>; <code>501</code> if no vision pipeline is wired.</td>
+      <td class="field-desc">Body <code>{"image_base64": "..."}</code> → <code>{"description": "...", "model_tier": "weak"}</code>. Asks the vision-capable tier for a literal description with a fixed internal prompt, using the same tier-selection and eviction path as any other vision request. Used by the built-in Chat UI to fold an image into a text conversation: it calls this on image attach, then inserts the returned description as a hidden context turn so every follow-up question is answered with the image in context, without re-running vision per turn. Bad base64 or an empty field → <code>400</code>; a cold-load timeout → <code>408</code>; <code>501</code> if no vision-capable tier is wired.</td>
     </tr>
     <tr>
       <td class="field-name">GET /v1/chats</td>
@@ -1020,83 +1022,87 @@ There is no local defer queue and no local drain loop.</p>
 <section id="model-roster">
 <h2>Model Roster</h2>
 
-<p>The server loads one model at a time. Text and vision each have their own tier list; the tables below are the text roster plus the vision tier. Every tier can run fully on GPU, split across GPU + system RAM, or entirely on CPU — the split is chosen at load time from current free VRAM.</p>
+<p>The server loads one model at a time per tier. Every tier can run fully on GPU, split across GPU + system RAM, or entirely on CPU — the split is chosen at load time from current free VRAM. The weak tier additionally has a vision-capable variant of the <em>same model</em> — see <a href="#vision-mode">How vision works</a> below.</p>
 
 <div class="table-wrap">
 <table>
   <thead>
-    <tr><th>Tier</th><th>Model</th><th>Weight (Q4_K_M)</th><th>Modality</th><th>Role</th></tr>
+    <tr><th>Tier</th><th>Model</th><th>Weight (Q4_K_M)</th><th>Vision</th><th>Role</th></tr>
   </thead>
   <tbody>
     <tr>
       <td><span class="badge badge-done">strong</span></td>
       <td class="field-name">gemma-4-e4b-q4_k_m</td>
       <td>4747 MB</td>
-      <td>text</td>
+      <td>&mdash;</td>
       <td class="field-desc">Primary for all requests when it fits on GPU (roughly 6 GB free at <code>max_parallel = 2</code> — weight plus two KV caches). Under pressure it partial-offloads before dropping tier.</td>
     </tr>
     <tr>
       <td><span class="badge badge-queued">mid</span></td>
       <td class="field-name">gemma-4-e2b-q4_k_m</td>
       <td>2963 MB</td>
-      <td>text</td>
+      <td>&mdash;</td>
       <td class="field-desc">Same Gemma 4 family as Strong. Selected when Strong can't fit even a partial GPU split, or when Strong's speed drops below the priority floor.</td>
     </tr>
     <tr>
       <td><span class="badge badge-normal">weak</span></td>
-      <td class="field-name">qwen2.5-3b-instruct</td>
-      <td>1930 MB</td>
-      <td>text</td>
-      <td class="field-desc">Small but capable last resort (strong coding for its size, 32K context). Partial-splits down to roughly 1.5 GB free VRAM (at <code>max_parallel = 2</code>); the final tier before deferral.</td>
-    </tr>
-    <tr>
-      <td><span class="badge badge-normal">weak</span></td>
-      <td class="field-name">smolvlm2-2.2b-q4_k_m</td>
-      <td>~1.6 GB (1.06 GB Q4_K_M text + 0.55 GB Q8_0 mmproj)</td>
-      <td>vision</td>
-      <td class="field-desc">The perception model for <code>modality: "vision"</code>. Runs with its own vision projector (<code>--mmproj</code>) on its own subprocess; produces a literal image description that a text tier then reasons over. Never resident at the same time as a text tier — see <a href="#vision-pipeline">How vision works</a>.</td>
+      <td class="field-name">qwen2.5-vl-3b-instruct</td>
+      <td>1840 MB (+805 MB mmproj for a vision load)</td>
+      <td>&check;</td>
+      <td class="field-desc">The last resort before deferral for text, and the <strong>only</strong> vision-capable tier — a natively multimodal model, so it answers image questions directly rather than through a separate captioning step. See <a href="#vision-mode">How vision works</a>.</td>
     </tr>
   </tbody>
 </table>
 </div>
 
-<h3 id="vision-pipeline">How vision works (SmolVLM2 &rarr; Gemma pipeline)</h3>
-<p>A <code>modality: "vision"</code> request runs in two hops, and the two models
-are <strong>never loaded at the same time</strong> — so peak VRAM is only what
-the reasoning hop needs and the server still idles at ~0 VRAM.</p>
+<h3 id="vision-mode">How vision works (native multimodal weak tier)</h3>
+<p>There is no separate vision model or pipeline. <code>modality: "vision"</code>
+is answered by the <strong>same</strong> weak-tier subprocess text uses —
+<code>qwen2.5-vl-3b-instruct</code> — loaded with its vision projector
+(<code>--mmproj</code>) so it sees the image directly in one inference. That
+projector is <strong>only</strong> loaded for a request that actually carries an
+image:</p>
 <ol style="color:#a1a1aa; line-height:2; padding-left:20px; margin-bottom:10px;">
-  <li><b>Perceive.</b> SmolVLM2 500M is loaded (its weights + vision projector,
-    &lt;1 GB) and asked <em>not</em> your question but a fixed instruction: produce
-    an exhaustive, literal inventory of everything in the image — all text and
-    numbers verbatim, objects, layout, colours. Then its subprocess is shut down
-    and its VRAM freed.</li>
-  <li><b>Reason.</b> That description is handed to the ordinary text roster as a
-    normal chat request: a system turn explaining "you can't see images, here is a
-    description", then your <code>prompt</code>. So tier selection, the speed-floor
-    cascade, <code>min_tier</code>, <code>preferred_tier</code>, deferral and
-    <code>response_format</code> all apply to this hop unchanged.</li>
+  <li>Every <code>vision</code> request restricts tier selection to the one tier
+    with a vision variant (weak) — a <code>preferred_tier</code> pin to <code>mid</code>
+    or <code>strong</code> on a vision request returns <code>400</code>.</li>
+  <li>If the weak-tier subprocess is already running but was spawned for <em>text</em>
+    (no <code>--mmproj</code>), it is evicted and reloaded with the projector before
+    the request is served — and vice versa for a text request arriving while a
+    vision-mode load is resident. Consecutive requests needing the <em>same</em> mode
+    reuse the warm subprocess with no reload.</li>
+  <li>The vision-mode load has its own VRAM budget (roster's <code>vision_required_vram_mb</code> /
+    <code>vision_kv_cache_mb</code> / <code>vision_kv_fixed_mb</code>) — the fit check,
+    speed-floor cascade, and idle/pressure eviction all size against whichever mode
+    is actually resident, never assuming a fixed footprint for the tier.</li>
 </ol>
-<p><b>Latency:</b> roughly 10&ndash;25 s fully cold (two model loads), a few
-seconds when a text tier is already warm from recent traffic.</p>
-<p><b>Degradation:</b> if VRAM pressure is so high that <em>no</em> text tier can
-load at all, the request returns SmolVLM2's raw description as the answer with
-<code>X-Quality-Degraded: true</code> rather than failing. Extreme pressure
-(&lt; 500 MB VRAM AND &gt; 90% CPU) defers like a text request.</p>
-<p><b>Trade-off:</b> the reasoning model only ever sees SmolVLM2's text, never the
-pixels — whatever the perception hop omits, the answer can't recover. For most
-"what does this show / what's the number / summarise this" questions that is
-fine; pixel-exact tasks are weaker than a natively-multimodal model would be.</p>
-<p>This is a general <em>pipeline</em> backend: a future audio or OCR modality is
-added by registering another perceive&rarr;reason pipeline with a different
-perception model and prompt — the core request path does not change. See
-<a href="#specialist-backends">Specialist Backends</a>.</p>
+<p><b>The point of the split:</b> a plain text request never pays for the mmproj —
+same subprocess identity, but no extra VRAM unless an image is actually in
+flight. Measured on an RTX 4060 Ti (8 GB): text-mode weak resident
+~2.2&ndash;2.3 GB; vision-mode weak resident ~3.2&ndash;3.6 GB (weight 1840 MB +
+mmproj 805 MB + KV/compute overhead) — a real, but request-scoped, cost.</p>
+<p><b>Degradation:</b> if VRAM pressure is so tight that even the weak tier's
+vision-mode footprint doesn't fit, the request returns <code>503 overloaded</code>
+rather than silently answering on a tier that can't see the image. Extreme
+pressure (&lt; 500 MB VRAM AND &gt; 90% CPU) defers like a text request.</p>
+<p><b>Model quality note:</b> Qwen2.5-VL-3B reliably answers <em>specific</em>
+questions about an image ("what colour is this", "what does this sign say") but
+can refuse ("I cannot see images") on a broad, unscoped "describe this image"
+prompt — a known small-VLM quirk. <code>POST /v1/describe</code>'s internal
+prompt is worded to avoid this (see below); a caller writing their own
+open-ended vision prompt should ask a specific question rather than a generic
+one.</p>
+<p>Multimodal support is <em>per-tier</em>, not a separate backend type: a future
+audio-capable model would extend the same tier the same way (a second
+conditionally-loaded projector), not add a new orchestration layer.</p>
 
 <h3>Tier selection algorithm</h3>
-<p>Per request, on the roster for the request's modality:</p>
+<p>Per request, across the full roster (a <code>vision</code> request first
+narrows this to tiers with a vision variant — currently only weak):</p>
 <ol style="color:#a1a1aa; line-height:2; padding-left:20px; margin-bottom:10px;">
-  <li><b>Pinned tier (if <code>preferred_tier</code> is set).</b> Skip steps 1–3 entirely — load exactly the requested tier, evicting a different already-loaded tier if needed. Never cascades away from it, even if that tier fails the speed floor.</li>
-  <li><b>Fit, largest first.</b> For each tier (largest weight first) compute the GPU/CPU layer split for current free VRAM, then the GPU-resident footprint (on-GPU weight fraction + the model's non-weight overhead). The non-weight overhead is <code>KVCacheMB × N + KVFixedMB</code>, where <code>N</code> is <code>max_parallel</code> (the concurrent-inference degree, default 2) — each of llama-server's <code>--parallel</code> slots holds its own KV cache, while the compute buffers and CUDA context are counted once. Admit the first tier whose footprint + 10% buffer fits.</li>
-  <li><b>CPU fallback.</b> If no tier fits any GPU layers, load the smallest tier whose non-weight overhead alone fits, with all weights in system RAM.</li>
+  <li><b>Pinned tier (if <code>preferred_tier</code> is set).</b> Skip steps 1–3 entirely — load exactly the requested tier, evicting a different already-loaded tier if needed. Never cascades away from it, even if that tier fails the speed floor. For a <code>vision</code> request the pinned tier must support vision, or this is <code>400</code>.</li>
+  <li><b>Fit, largest first.</b> For each candidate tier (largest weight first) compute the GPU/CPU layer split for current free VRAM, then the GPU-resident footprint (on-GPU weight fraction + the model's non-weight overhead). The non-weight overhead is <code>KVCacheMB × N + KVFixedMB</code> (or the <code>vision_*</code> equivalents for a vision request), where <code>N</code> is <code>max_parallel</code> (the concurrent-inference degree, default 2) — each of llama-server's <code>--parallel</code> slots holds its own KV cache, while the compute buffers and CUDA context are counted once. Admit the first tier whose footprint + 10% buffer fits.</li>
+  <li><b>CPU fallback.</b> If no candidate tier fits any GPU layers, load the smallest one whose non-weight overhead alone fits, with all weights in system RAM.</li>
   <li><b>Speed-floor cascade.</b> If the chosen tier's rolling tok/sec is below the priority floor (high = 8, normal = 4, low = none), drop to the next-smaller tier and re-select. <code>min_tier</code> caps how far this can drop; a request pinned to a tier it can't speed-satisfy is served there (degraded) rather than failing.</li>
   <li><b>OOM cascade.</b> If the chosen tier's subprocess actually fails to load (CUDA OOM at spawn), it is evicted and the next-smaller tier is tried — bounded by <code>min_tier</code> and skipped for a <code>preferred_tier</code> pin.</li>
   <li><b>Deferral.</b> If free VRAM &lt; 500 MB AND CPU &gt; 90% and a relay is configured, the request is handed to the relay (<code>202</code>, see <a href="#pressure-policy">Pressure Policy</a>) unless <code>priority = "high"</code>.</li>
@@ -1261,17 +1267,13 @@ DATABASE_URL=… go run ./cmd/memberadd -list                             # show
 <section id="specialist-backends">
 <h2>Specialist Backends</h2>
 
-<p>The router dispatches by <code>modality</code> string to a registered backend. Additional specialist backends — code completion, embeddings, speech-to-text — can be registered as new modality keys without changing the request/response contract or the core pipeline (queue &rarr; batcher &rarr; dispatcher &rarr; router).</p>
+<p>The router dispatches by <code>modality</code> string to a registered backend. <code>text</code> and <code>vision</code> currently share one backend instance (the tiered roster) — a request's <code>modality</code>, plus whether it carries image data, decides which tier and which subprocess mode serves it. Additional specialist modalities can be registered as new modality keys without changing the core pipeline (queue &rarr; batcher &rarr; dispatcher &rarr; router).</p>
 
-<p>Two extension shapes exist:</p>
-<ul>
-  <li><b>A plain backend</b> — one model behind the <code>backend.Backend</code> interface, registered under its own modality string (how the text roster works).</li>
-  <li><b>A pipeline backend</b> — a backend that itself orchestrates a <em>perceive</em> sub-backend and a <em>reason</em> sub-backend, evicting the first before running the second so they never share VRAM (how <code>vision</code> works — see <a href="#vision-pipeline">How vision works</a>). An audio modality (a speech model perceiving &rarr; a text tier reasoning), or an OCR specialist, is added the same way: a new pipeline with a different perception model and prompt.</li>
-</ul>
+<p>Multimodal capability is added <em>per-tier</em> rather than as a separate pipeline: a roster entry with an <code>MMProjPath</code> is vision-capable, and its subprocess is spawned with or without <code>--mmproj</code> depending on whether the in-flight request needs it (see <a href="#vision-mode">How vision works</a>). An audio-capable model would extend a tier the same way once llama.cpp's audio path is usable.</p>
 
 <p>When a specialist backend is added it will be documented here with its modality string, accepted input fields, and response shape. Requests for an unregistered modality return <code>503 unavailable</code>.</p>
 
-<p style="color:#52525b;">Registered in the current build: <code>text</code> (tiered roster) and <code>vision</code> (SmolVLM2 &rarr; Gemma pipeline). Audio is not — the Gemma&nbsp;4 audio encoder is not yet functional in llama.cpp.</p>
+<p style="color:#52525b;">Registered in the current build: <code>text</code> and <code>vision</code>, both served by the tiered roster (the weak tier is the only vision-capable one). Audio is not — the Gemma&nbsp;4 audio encoder is not yet functional in llama.cpp.</p>
 </section>
 
 </body>

@@ -82,17 +82,18 @@ the `/v1/infer` contract.
 
 ## Model roster
 
-| Tier       | Model (GGUF)               | Weight  | Modality | Role                                          |
-| ---------- | -------------------------- | ------- | -------- | --------------------------------------------- |
-| **Strong** | Gemma 4 E4B Q4_K_M         | ~4.7 GB | text     | Primary under normal conditions               |
-| **Mid**    | Gemma 4 E2B Q4_K_M         | ~3.0 GB | text     | Moderate-pressure fallback (same family)      |
-| **Weak**   | Qwen2.5-3B-Instruct Q4_K_M | ~1.9 GB | text     | Extreme-pressure last resort before deferral  |
-| **Weak**   | SmolVLM2 2.2B Q4_K_M       | ~1.6 GB | vision   | Vision perception model (SmolVLM2 → Gemma pipeline) |
+| Tier       | Model (GGUF)               | Weight  | Vision | Role                                          |
+| ---------- | -------------------------- | ------- | :----: | --------------------------------------------- |
+| **Strong** | Gemma 4 E4B Q4_K_M         | ~4.7 GB |   —    | Primary under normal conditions               |
+| **Mid**    | Gemma 4 E2B Q4_K_M         | ~3.0 GB |   —    | Moderate-pressure fallback (same family)      |
+| **Weak**   | Qwen2.5-VL-3B-Instruct Q4_K_M | ~1.8 GB (+0.8 GB mmproj) | ✓ | Text last resort *and* the only vision-capable tier — a natively multimodal model, so it answers image questions directly instead of through a separate captioning hop |
 
 These were picked for bang for buck on my 8 GB card — the most capable model at
 each size that still leaves room to run. Weight sizes aren't hard VRAM
 requirements: the model splits across GPU VRAM and system RAM, more on the GPU
-being faster. Specialist models (OCR, audio, code) can be added in later.
+being faster. The weak tier's vision projector (`--mmproj`) is only loaded for
+a request that actually carries an image — a plain text request costs nothing
+extra. Specialist models (OCR, audio, code) can be added in later.
 
 ---
 
@@ -114,8 +115,8 @@ Real inference needs:
 - `nvml.dll` in `System32` (ships with the NVIDIA driver)
 - The GGUF model files in `models\`:
   `gemma-4-e4b-q4_k_m.gguf`, `gemma-4-e2b-q4_k_m.gguf`,
-  `qwen2.5-3b-instruct-q4_k_m.gguf`, `smolvlm2-2.2b-q4_k_m.gguf` +
-  `smolvlm2-2.2b-mmproj-q8_0.gguf` (vision)
+  `qwen2.5-vl-3b-instruct-q4_k_m.gguf` +
+  `mmproj-qwen2.5-vl-3b-instruct-q8_0.gguf` (the weak tier's vision projector)
 
 From another terminal:
 
@@ -287,10 +288,10 @@ The server has loopback-only admin endpoints — `curl` from the box, or the
 | `cmd/memberadd/`                                                                   | relay invite-list CLI                                    |
 | `cmd/nvml-check/`                                                                  | live VRAM probe                                          |
 | `internal/queue/`, `internal/batcher/`, `internal/dispatcher/`, `internal/router/` | the core pipeline                                        |
-| `internal/backend/vram/`                                                           | tier selection, layer split, eviction, reaper            |
-| `internal/backend/llamacpp/`                                                       | `llama-server` subprocess + HTTP client                  |
-| `internal/backend/stub/`, `internal/backend/vision/`                               | fake backend (CI) + vision stub                          |
-| `internal/deferq/`                                                                 | local priority defer queue                               |
+| `internal/backend/vram/`                                                           | tier selection (incl. vision-mode), layer split, eviction, reaper |
+| `internal/backend/llamacpp/`                                                       | `llama-server` subprocess + HTTP client, conditional `--mmproj` spawn |
+| `internal/backend/stub/`                                                           | fake backend (CI)                                        |
+| `internal/relayenqueue/`                                                           | local side of durable deferral to the relay               |
 | `internal/remote/`                                                                 | PC-side long-poll worker                                 |
 | `internal/railwayq/`                                                               | relay queue store + HTTP handlers                        |
 | `internal/stackauth/`                                                              | Neon Auth (Stack Auth) JWKS / ES256 verification         |
