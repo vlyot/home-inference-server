@@ -57,11 +57,20 @@ func resolveIdentity(ctx context.Context, r *http.Request, cfg Config, db *sql.D
 	return "", http.StatusUnauthorized, false
 }
 
-// identityMiddleware authenticates every request (except /healthz) and, for
-// /enqueue, enforces the per-identity rate limit and daily quota.
+// publicPaths lists routes that bypass identity resolution entirely: the
+// liveness check, and the mirrored API docs page (see dashboard.New) — the
+// docs are reference material meant to be readable by any client or AI
+// agent hitting this relay's public URL, not a member-gated capability.
+var publicPaths = map[string]bool{
+	"/healthz": true,
+	"/docs":    true,
+}
+
+// identityMiddleware authenticates every request (except publicPaths) and,
+// for /enqueue, enforces the per-identity rate limit and daily quota.
 func identityMiddleware(db *sql.DB, cfg Config, limiter *Limiter, verifier *stackauth.Verifier, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/healthz" {
+		if publicPaths[r.URL.Path] {
 			next.ServeHTTP(w, r)
 			return
 		}

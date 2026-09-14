@@ -81,6 +81,25 @@ func TestHealthzBypassesAuth(t *testing.T) {
 	}
 }
 
+// TestDocsBypassesAuthAndServesDocsHTML guards the fix for a real gap: the
+// API docs (assets/web/docs.html) were only reachable at the home server's
+// own loopback address, so no client or AI agent without direct network
+// access to that machine could ever read them. This relay is already
+// reachable from the public internet for /enqueue etc., so mirroring the
+// same embedded docs.html at /docs here — with no auth required, like
+// /healthz — gives any caller a public URL for the API reference.
+func TestDocsBypassesAuthAndServesDocsHTML(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/docs", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /docs (no auth) = %d, want 200", rr.Code)
+	}
+	if !strings.Contains(rr.Body.String(), "<html") {
+		t.Errorf("GET /docs body doesn't look like HTML: %.100s", rr.Body.String())
+	}
+}
+
 func TestEnqueueRequiresAuth(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	rr := httptest.NewRecorder()
