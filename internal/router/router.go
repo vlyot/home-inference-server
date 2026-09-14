@@ -94,5 +94,6 @@ func (r *Router) DispatchOne(ctx context.Context, job queue.Job, batchSize int) 
 		QualityDegraded: resp.QualityDegraded,
 		TokPerSecSample: resp.TokPerSecSample,
 		StartedAt:       startedAt,
+		LengthLimited:   resp.LengthLimited,
 	})
 }

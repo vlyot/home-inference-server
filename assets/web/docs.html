@@ -163,6 +163,7 @@
     <a href="/logs" class="badge badge-queued">Logs UI</a>
     <a href="/healthz" class="badge badge-done">GET /healthz</a>
     <a href="/v1/status/pressure" class="badge badge-queued">GET /v1/status/pressure</a>
+    <a href="https://queue-api-production-4dfb.up.railway.app/docs" class="badge badge-queued" target="_blank" rel="noopener">Hosted docs (public)</a>
   </span>
 </header>
 
@@ -286,6 +287,74 @@ The client just parses <code>output</code> as JSON.</p>
     <code>preferred_tier</code>.</li>
 </ul>
 
+<h3 id="tools">Web Search Tool Calling</h3>
+<p>Add <code>tools</code> to any request that uses
+<code>text_input.messages</code> to let the model reach for a live web search
+when it judges an answer needs current or verifiable information instead of
+relying on training-data recall. The model decides per-request whether to
+use it &mdash; most prompts won't trigger a search at all. The round trip
+(model requests a search &rarr; server queries Tavily's search API
+&rarr; server feeds the results back &rarr; model produces a grounded answer)
+happens entirely server-side, inside the one HTTP call. The client sends
+<code>tools</code> and reads <code>output</code> &mdash; nothing else to
+implement.</p>
+<pre><code>curl -X POST http://localhost:8080/v1/infer \
+  -H "Content-Type: application/json" \
+  -d '{
+    "modality": "text",
+    "text_input": { "messages": [
+      { "role": "user", "content": "What is a recent headline about the Go programming language?" }
+    ]},
+    "tools": [{
+      "type": "function",
+      "function": {
+        "name": "web_search",
+        "description": "Search the web for current information",
+        "parameters": { "type": "object",
+          "properties": { "query": { "type": "string" } },
+          "required": ["query"] }
+      }
+    }]
+  }'
+# -> {"output": "...grounded in real search results...", "tool_calls": [
+#      {"name": "web_search", "arguments": "{\"query\":\"...\"}"}
+#    ], ...}</code></pre>
+<p>Notes:</p>
+<ul>
+  <li><strong>Only <code>web_search</code> is a real, resolved tool.</strong>
+    Any other tool name the model is offered and calls gets a synthesized
+    "tool not available" result rather than failing the request &mdash; the
+    model gets a chance to say it couldn't complete the action.</li>
+  <li><strong>One grounding hop, hard bound.</strong> The server calls the
+    model, resolves at most one round of tool calls, then calls the model
+    exactly once more (with <code>tools</code> cleared) for the final answer.
+    Never a multi-round call&rarr;search&rarr;call&rarr;search loop.</li>
+  <li>Requires <code>text_input.messages</code> (the chat path). A bare
+    <code>text_input.prompt</code> request with <code>tools</code> set
+    returns <code>400</code> <code>{"code": "invalid_request"}</code>.</li>
+  <li>Not supported with <code>vision_input</code> &mdash; the vision tier's
+    chat template has no tool-calling grammar. Returns <code>400</code>
+    <code>{"code": "tool_not_supported"}</code>.</li>
+  <li><strong>Works with <code>stream: true</code>.</strong> The model's
+    reasoning (if any) streams live as usual while it decides whether to
+    search; if it calls <code>web_search</code>, one <code>StreamChunk</code>
+    carries a <code>tool_call</code> field (<code>{"name", "arguments"}</code>)
+    before the grounded answer's content starts streaming. See the
+    <a href="#streaming">Streaming Guide</a>.</li>
+  <li>If the search backend is unreachable or rate-limited, the request does
+    <strong>not</strong> fail: on an unreachable backend the search client
+    retries once after a short wait; either way, if search still can't be
+    completed, the tool result the model receives explicitly instructs it to
+    answer from training data and say so &mdash; e.g. "Based on my last
+    update..." &mdash; rather than silently presenting a stale or guessed
+    answer as current. See <code>tool_unavailable</code> vs
+    <code>tool_rate_limited</code> in <a href="#error-codes">Error Codes</a>.</li>
+  <li><code>tool_calls</code> on the response is observability only &mdash;
+    the tool round-trip already happened; it lists what was resolved and
+    with what arguments, plus an <code>error</code> field per call if
+    resolution failed.</li>
+</ul>
+
 <h3>Streaming (SSE)</h3>
 <pre><code>curl -N -X POST http://localhost:8080/v1/infer \
   -H "Content-Type: application/json" \
@@ -391,6 +460,12 @@ The client just parses <code>output</code> as JSON.</p>
       <td class="field-type">object</td>
       <td class="field-default">null (unconstrained)</td>
       <td class="field-desc">Constrains output to a JSON shape. Forwarded verbatim to llama-server, which compiles it to a sampling grammar so the model cannot emit a non-conforming token. Accepts <code>{"type":"json_object"}</code> or <code>{"type":"json_schema","json_schema":{...}}</code> (OpenAI shape). <strong>Requires <code>text_input.messages</code></strong> — ignored on a prompt-only request. Works on a <code>vision</code> request the same way — the schema constrains the model's answer about the image. A schema llama-server cannot compile returns <code>400 {"code":"invalid_grammar"}</code>. See <a href="#structured-output">Structured Output</a>.</td>
+    </tr>
+    <tr>
+      <td class="field-name">tools</td>
+      <td class="field-type">array</td>
+      <td class="field-default">[] (no tools offered)</td>
+      <td class="field-desc">Offers the model function-calling tools it may invoke instead of answering directly. OpenAI shape: <code>[{"type":"function","function":{"name","description","parameters"}}]</code>. Currently only <code>"web_search"</code> is a real, resolved tool — resolved entirely server-side inside this one request, whether streaming or not. <strong>Requires <code>text_input.messages</code></strong> — a prompt-only request with <code>tools</code> set returns <code>400 invalid_request</code>. Rejected with <code>vision_input</code> (<code>400 {"code":"tool_not_supported"}</code> — the vision tier's chat template has no tool-calling grammar). Compatible with <code>stream: true</code> — see <a href="#tools">Web Search Tool Calling</a> and the <a href="#streaming">Streaming Guide</a>'s "Web search tool calls" section.</td>
     </tr>
   </tbody>
 </table>
@@ -544,6 +619,16 @@ The client just parses <code>output</code> as JSON.</p>
       <td class="field-type">boolean</td>
       <td class="field-desc">Omitted when false. On a <code>200</code> this is not set — a served request was never deferred. See <a href="#pressure">Deferral</a> for the <code>202</code> hand-off response.</td>
     </tr>
+    <tr>
+      <td class="field-name">tool_calls</td>
+      <td class="field-type">ToolCallSummary[]</td>
+      <td class="field-desc">Omitted when empty. Lists the tool(s) the model invoked while producing this answer, in resolution order — <code>{"name", "arguments", "error"}</code> per call (<code>error</code> omitted when resolution succeeded). Observability only: the tool round-trip already happened server-side, <code>output</code> is the final, grounded answer. See <a href="#tools">Web Search Tool Calling</a>.</td>
+    </tr>
+    <tr>
+      <td class="field-name">truncated</td>
+      <td class="field-type">boolean</td>
+      <td class="field-desc">Omitted when false. Set when the model was still generating when it hit its <code>max_tokens</code> budget (llama-server's <code>finish_reason: "length"</code>) — <code>output</code> is genuine model text but ends mid-thought rather than at a natural stop. Not an error: the request succeeded and <code>output</code> should be kept, just flagged as incomplete. The streaming equivalent is <code>StreamChunk.truncated</code> below.</td>
+    </tr>
   </tbody>
 </table>
 </div>
@@ -624,7 +709,7 @@ The client just parses <code>output</code> as JSON.</p>
     <tr>
       <td class="field-name">truncated</td>
       <td class="field-type">boolean</td>
-      <td class="field-desc">Set on the final <code>done=true</code> chunk when the backend failed <em>after</em> already delivering real <code>delta</code> content, <em>and</em> the request had no <code>response_format</code> — free-form prose only. This is not a failure — every prior <code>delta</code> chunk is genuine model output; treat it like a normal successful completion, just cut short, rather than discarding what streamed. Summary fields (<code>duration_ms</code>, <code>model_tier</code>, etc.) are populated on a best-effort basis. A request that set <code>response_format</code> never gets <code>truncated</code>: partial JSON is not a usable partial answer, so that case always surfaces as <code>error</code> instead — see <a href="#streaming">Streaming Guide</a>. Mutually exclusive with <code>error</code>. Omitted otherwise.</td>
+      <td class="field-desc">Set on the final <code>done=true</code> chunk in either of two distinct cases: (1) the backend failed <em>after</em> already delivering real <code>delta</code> content, and the request had no <code>response_format</code> — free-form prose only; or (2) the model was still generating when it hit its <code>max_tokens</code> budget (llama-server's <code>finish_reason: "length"</code>) — a perfectly healthy completion that simply ran out of room. Neither case is a failure — every prior <code>delta</code> chunk is genuine model output; treat it like a normal successful completion, just cut short, rather than discarding what streamed. Summary fields (<code>duration_ms</code>, <code>model_tier</code>, etc.) are populated on a best-effort basis. A request that set <code>response_format</code> never gets <code>truncated</code> from case (1): partial JSON is not a usable partial answer, so that case always surfaces as <code>error</code> instead — see <a href="#streaming">Streaming Guide</a>. Mutually exclusive with <code>error</code>. Omitted otherwise.</td>
     </tr>
   </tbody>
 </table>
@@ -810,6 +895,7 @@ data: [DONE]</code></pre>
 <p>The stream ends with a literal <code>data: [DONE]</code> line after the final chunk.</p>
 <p>If inference fails mid-stream <em>before any content was produced</em>, the final chunk instead carries an <code>error</code> field (e.g. <code>{"...","done":true,"error":"overloaded"}</code>) with no summary fields, followed by <code>data: [DONE]</code>. Check <code>chunk.error</code> before treating a <code>done</code> chunk as success. A completion that returns no backend error but yields zero content and zero reasoning also terminates with <code>"error":"internal_error"</code> rather than an empty success chunk — a bare <code>done</code> chunk with no <code>error</code> and no <code>truncated</code> always means at least one <code>delta</code> chunk was produced.</p>
 <p>If inference fails mid-stream <em>after</em> some content was already delivered, and the request had <strong>no <code>response_format</code></strong> (plain prose), the final chunk instead carries <code>"truncated": true</code> — not <code>error</code>. This is deliberately not treated as a failure: every prior <code>delta</code> chunk is genuine model output, and a client should keep it (the built-in Chat UI appends a small "response cut short" note rather than discarding the turn). Only a chunk with neither <code>error</code> nor <code>truncated</code> set is a fully complete response.</p>
+<p>The same <code>"truncated": true</code> flag also appears on a stream that completed with <strong>no error at all</strong>, if the model was still generating when it hit its <code>max_tokens</code> budget (llama-server's <code>finish_reason: "length"</code>) — most likely on a long reasoning turn, or a tool-calling turn where the injected search-result content leaves less room for the visible answer. This looks identical to a normal successful stream except for this flag, so always check it even when <code>error</code> is empty.</p>
 <p><strong>Structured-output callers: <code>truncated</code> never applies to a <code>response_format</code> request.</strong> Half a grammar-constrained JSON payload is not a usable partial result — it will fail <code>JSON.parse</code>/<code>json.Unmarshal</code> on your side — so a mid-stream failure under <code>response_format</code> always ends the stream with <code>error</code> instead, even if some content had already streamed. Never attempt to parse accumulated <code>delta</code> text from a stream that ended in <code>error</code>; only a stream that ends with neither <code>error</code> nor <code>truncated</code> set is guaranteed to be complete, schema-conforming JSON.</p>
 
 <h3>Reasoning models</h3>
@@ -824,6 +910,25 @@ data: {"request_id":"...","correlation_id":"...","done":true,"tokens_generated":
 
 data: [DONE]</code></pre>
 <p>Render <code>reasoning</code> chunks separately from <code>delta</code> chunks — the built-in Chat UI shows them in a collapsible "Thinking…" section that auto-collapses once the first <code>delta</code> chunk arrives, matching llama-server's own chat UI. A hard prompt can cause a reasoning model to spend its entire <code>max_tokens</code> budget thinking and never produce a visible answer; when that happens the stream ends with <code>"error":"reasoning_exhausted"</code> instead of a silent empty success (see <a href="#error-codes">Error Codes</a>). The non-streaming <code>POST /v1/infer</code> response carries the same distinction via <code>InferResponse.reasoning</code>, separate from <code>output</code>.</p>
+
+<h3>Web search tool calls</h3>
+<p>When the request carries <code>tools</code> (see
+<a href="#tools">Web Search Tool Calling</a>) and the model calls
+<code>web_search</code>, one notification chunk carries a
+<code>tool_call</code> field before the grounded answer's <code>delta</code>
+chunks begin. The model's reasoning about whether/what to search still
+streams live as ordinary <code>reasoning</code> chunks beforehand — nothing
+is buffered or delayed on that account:</p>
+<pre><code>data: {"request_id":"...","correlation_id":"...","reasoning":"The user wants current info, I should search.","done":false}
+
+data: {"request_id":"...","correlation_id":"...","tool_call":{"name":"web_search","arguments":"{\"query\":\"go 1.27 release\"}"},"done":false}
+
+data: {"request_id":"...","correlation_id":"...","delta":"Go 1.27 was recently released...","done":false}
+
+data: {"request_id":"...","correlation_id":"...","done":true,"tokens_generated":58,...}
+
+data: [DONE]</code></pre>
+<p>Most turns never call the tool at all (the model decides per-request), in which case the stream looks exactly like any other streaming response — no <code>tool_call</code> chunk appears. If the search itself fails or is rate-limited, no error is raised: the stream continues into a grounded-or-not final answer exactly as the non-streaming path does (see <a href="#tools">Web Search Tool Calling</a>'s graceful-degradation notes), just delivered as <code>delta</code> chunks instead of one JSON body.</p>
 
 <h3>JavaScript consumer example</h3>
 <pre><code>const res = await fetch('/v1/infer', {
@@ -944,8 +1049,26 @@ There is no local defer queue and no local drain loop.</p>
     <tr>
       <td class="field-name">not_implemented</td>
       <td>501</td>
-      <td class="field-desc">A documented capability not wired up in this build. No modality currently returns this — both <code>text</code> and <code>vision</code> are implemented. Reserved for future specialist backends.</td>
+      <td class="field-desc">A documented capability not wired up in this build. No modality/field combination currently triggers this in the default configuration — reserved for future specialist backends.</td>
       <td class="field-desc">n/a for the current roster.</td>
+    </tr>
+    <tr>
+      <td class="field-name">tool_not_supported</td>
+      <td>400</td>
+      <td class="field-desc"><code>tools</code> combined with <code>vision_input</code> — the vision tier's chat template has no tool-calling grammar.</td>
+      <td class="field-desc">Drop <code>tools</code> from a vision request, or resolve the tool need before/after the vision call.</td>
+    </tr>
+    <tr>
+      <td class="field-name">tool_unavailable</td>
+      <td>—</td>
+      <td class="field-desc">Never returned as the request's HTTP status — this only appears inside a resolved <code>tool_calls[].error</code> field when the search backend (Tavily) was unreachable, timed out, or returned an unexpected error. The request still succeeds: the model receives an error string as the tool result and a chance to say it couldn't search.</td>
+      <td class="field-desc">Transient — the request itself needs no retry (the client already retries once internally).</td>
+    </tr>
+    <tr>
+      <td class="field-name">tool_rate_limited</td>
+      <td>—</td>
+      <td class="field-desc">Never returned as the request's HTTP status — this only appears inside a resolved <code>tool_calls[].error</code> field when Tavily responds <code>429</code> (keyless access is rate-limited; see <a href="https://docs.tavily.com/documentation/rate-limits" target="_blank" rel="noopener">docs.tavily.com/documentation/rate-limits</a>). Distinct from <code>tool_unavailable</code> because the remedy differs. The request still succeeds: the model receives an error string as the tool result.</td>
+      <td class="field-desc">If this becomes frequent, add a free Tavily API key (no card required — see <a href="https://docs.tavily.com/documentation/keyless" target="_blank" rel="noopener">docs.tavily.com/documentation/keyless</a>) for a much higher limit.</td>
     </tr>
     <tr>
       <td class="field-name">unauthorized</td>

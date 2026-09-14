@@ -234,12 +234,14 @@ func chatStub(t *testing.T) (*httptest.Server, *stubState) {
 		st.lastMaxTokens = body.MaxTokens
 		st.lastResponseFormat = string(body.ResponseFormat)
 		resp := chatResp{}
-		resp.Choices = append(resp.Choices, struct {
+		resp.Choices = make([]struct {
 			Message struct {
-				Content          string `json:"content"`
-				ReasoningContent string `json:"reasoning_content"`
+				Content          string         `json:"content"`
+				ReasoningContent string         `json:"reasoning_content"`
+				ToolCalls        []wireToolCall `json:"tool_calls"`
 			} `json:"message"`
-		}{})
+			FinishReason string `json:"finish_reason"`
+		}, 1)
 		resp.Choices[0].Message.Content = "chat-path"
 		resp.Usage.CompletionTokens = 5
 		json.NewEncoder(w).Encode(resp)
@@ -539,12 +541,14 @@ func chatStubWithCtx(t *testing.T, nCtx, tokenizeCount int) (*httptest.Server, *
 		json.NewDecoder(r.Body).Decode(&body)
 		st.lastMaxTokens = body.MaxTokens
 		resp := chatResp{}
-		resp.Choices = append(resp.Choices, struct {
+		resp.Choices = make([]struct {
 			Message struct {
-				Content          string `json:"content"`
-				ReasoningContent string `json:"reasoning_content"`
+				Content          string         `json:"content"`
+				ReasoningContent string         `json:"reasoning_content"`
+				ToolCalls        []wireToolCall `json:"tool_calls"`
 			} `json:"message"`
-		}{})
+			FinishReason string `json:"finish_reason"`
+		}, 1)
 		resp.Choices[0].Message.Content = "ok"
 		json.NewEncoder(w).Encode(resp)
 	})
@@ -621,12 +625,14 @@ func TestResolveChatMaxTokens_FallsBackWhenPropsFails(t *testing.T) {
 		json.NewDecoder(r.Body).Decode(&body)
 		lastMaxTokens = body.MaxTokens
 		resp := chatResp{}
-		resp.Choices = append(resp.Choices, struct {
+		resp.Choices = make([]struct {
 			Message struct {
-				Content          string `json:"content"`
-				ReasoningContent string `json:"reasoning_content"`
+				Content          string         `json:"content"`
+				ReasoningContent string         `json:"reasoning_content"`
+				ToolCalls        []wireToolCall `json:"tool_calls"`
 			} `json:"message"`
-		}{})
+			FinishReason string `json:"finish_reason"`
+		}, 1)
 		json.NewEncoder(w).Encode(resp)
 	})
 	// No /tokenize or /props handler — both introspection calls fail (404).

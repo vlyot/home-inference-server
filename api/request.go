@@ -52,6 +52,29 @@ type InferRequest struct {
 	// prompt-only request. Adds a small per-token sampling cost. A schema
 	// llama-server rejects returns ErrCodeInvalidGrammar (HTTP 400).
 	ResponseFormat json.RawMessage `json:"response_format,omitempty"`
+	// Tools, when set, offers the model function-calling tools it may invoke
+	// instead of answering directly. Requires text_input.messages (the chat
+	// path) and is rejected alongside vision_input (ErrCodeInvalidRequest) —
+	// the vision tier's chat template has no tool-calling grammar. Currently
+	// the only tool the server resolves is "web_search"; a request naming any
+	// other tool still round-trips normally but the model's call for it is
+	// answered with a synthetic "tool not available" result rather than
+	// failing the request. Not supported with stream:true (ErrCodeNotImplemented).
+	Tools []Tool `json:"tools,omitempty"`
+}
+
+// Tool describes one function the model may call, per the OpenAI
+// function-calling shape llama-server's chat template expects verbatim.
+type Tool struct {
+	Type     string       `json:"type"` // always "function"
+	Function ToolFunction `json:"function"`
+}
+
+// ToolFunction is the callable description inside a Tool.
+type ToolFunction struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"` // JSON Schema
 }
 
 // TextInput carries a prompt for completion or a message list for chat.

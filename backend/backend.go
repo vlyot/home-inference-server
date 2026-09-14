@@ -16,8 +16,38 @@ const (
 // Message is a single conversation turn passed through to the model's
 // chat-completions endpoint.
 type Message struct {
-	Role    string // "system" | "user" | "assistant"
+	Role    string // "system" | "user" | "assistant" | "tool"
 	Content string
+	// ToolCalls is set on an "assistant" turn that invoked one or more tools
+	// instead of (or alongside) answering directly.
+	ToolCalls []ToolCall
+	// ToolCallID and Name identify which prior ToolCall a "tool" role message
+	// is answering — required by the chat template to match a result back to
+	// its call.
+	ToolCallID string
+	Name       string
+}
+
+// Tool describes one function the model may call. Mirrors api.Tool; kept as
+// a separate type so backend stays free of the api package's concerns.
+type Tool struct {
+	Type     string
+	Function ToolFunction
+}
+
+// ToolFunction is the callable description inside a Tool.
+type ToolFunction struct {
+	Name        string
+	Description string
+	Parameters  json.RawMessage // JSON Schema
+}
+
+// ToolCall is one invocation the model requested, parsed from the chat
+// template's tool-call output.
+type ToolCall struct {
+	ID        string
+	Name      string
+	Arguments string // raw JSON object, as the model emitted it
 }
 
 // Request is the backend-internal inference request. The router translates
@@ -69,6 +99,11 @@ type Request struct {
 	// "response_format" so llama-server constrains sampling to the schema. Only
 	// the Messages path honours it. Nil = unconstrained.
 	ResponseFormat json.RawMessage
+	// Tools, when non-empty, is forwarded verbatim as the chat-completions
+	// "tools" field. Only the Messages path honours it — a request with
+	// ImageData and Tools is rejected before reaching the backend (see
+	// server.handleInfer). Empty = no tools offered.
+	Tools []Tool
 }
 
 // Response is what a Backend returns after inference completes.
@@ -90,6 +125,19 @@ type Response struct {
 	// Set by llamacpp.Backend from llama-server's timings block; 0 if unavailable.
 	// Used to update the rolling average on the backend — not forwarded to callers.
 	TokPerSecSample float64
+	// ToolCalls is set when the model's chat-completions response carried
+	// tool_calls (finish_reason "tool_calls") instead of, or in addition to, a
+	// final answer. Output may be empty in this case — the caller is expected
+	// to resolve each call and continue the conversation with the results.
+	ToolCalls []ToolCall
+	// LengthLimited is true when llama-server reported finish_reason "length"
+	// — the model was still generating when it hit its max_tokens budget, so
+	// Output/the streamed deltas are genuine model text but end mid-thought
+	// rather than at a natural stop. Distinct from a subprocess crash (which
+	// server_stream.go salvages as Truncated via a request error), this is a
+	// clean response with no error at all — the caller must inspect this
+	// field to know the answer was cut short.
+	LengthLimited bool
 }
 
 // ChunkKind identifies what a streamed delta represents.
@@ -114,9 +162,14 @@ type Measurable interface {
 // The server checks for this interface when req.Stream is true; if absent,
 // the streaming request falls back to non-streaming.
 type Streamer interface {
-	// InferStream runs inference and calls chunkFn for each token delta as
-	// it is produced, tagged with its ChunkKind. Returns the final summary
-	// (tokens, timing) when done.
+	// InferStream runs inference and calls chunkFn for each content/reasoning
+	// token delta as it is produced, tagged with its ChunkKind. When req.Tools
+	// is set and the model calls a tool instead of (or before) answering, the
+	// returned Response.ToolCalls is populated — tool-call argument fragments
+	// are never passed to chunkFn (there is nothing user-legible in a lone
+	// `"query` fragment); only content and reasoning stream live. The caller
+	// is expected to resolve each call and continue the conversation with the
+	// results, exactly as with the non-streaming Infer's ToolCalls.
 	InferStream(ctx context.Context, req Request, chunkFn func(kind ChunkKind, delta string)) (Response, error)
 }
 

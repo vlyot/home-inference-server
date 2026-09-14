@@ -244,6 +244,25 @@ func completeStream(ctx context.Context, baseURL string, req backend.Request, ch
 type chatMessage struct {
 	Role    string `json:"role"`
 	Content any    `json:"content"`
+	// ToolCalls is set on an "assistant" turn that invoked tools — required so
+	// a later "tool" role message in the same conversation can be matched back
+	// to the call it answers via ToolCallID.
+	ToolCalls []wireToolCall `json:"tool_calls,omitempty"`
+	// ToolCallID identifies which ToolCall a "tool" role message answers.
+	ToolCallID string `json:"tool_call_id,omitempty"`
+	// Name is the tool name on a "tool" role message.
+	Name string `json:"name,omitempty"`
+}
+
+// wireToolCall is the OpenAI chat-completions shape for one tool invocation,
+// used both in a request's assistant-turn history and a response's tool_calls.
+type wireToolCall struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"` // "function"
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"` // raw JSON object as a string
+	} `json:"function"`
 }
 
 // contentPart is one element of a multi-part message: a text span or an image.
@@ -285,6 +304,35 @@ type chatReq struct {
 	// compiles a {"type":"json_schema",...} or {"type":"json_object"} value to
 	// a GBNF sampling grammar. Nil / omitted leaves generation unconstrained.
 	ResponseFormat json.RawMessage `json:"response_format,omitempty"`
+	// Tools is forwarded verbatim from the caller — llama-server's chat
+	// template (when it defines one, e.g. Gemma-4's tool-call DSL) compiles
+	// this into the system-turn tool declarations and a grammar constraining
+	// output to valid tool-call syntax. Omitted (nil) leaves tool-calling off.
+	Tools []wireTool `json:"tools,omitempty"`
+}
+
+// wireTool mirrors backend.Tool for the wire format.
+type wireTool struct {
+	Type     string `json:"type"`
+	Function struct {
+		Name        string          `json:"name"`
+		Description string          `json:"description,omitempty"`
+		Parameters  json.RawMessage `json:"parameters,omitempty"`
+	} `json:"function"`
+}
+
+func toWireTools(tools []backend.Tool) []wireTool {
+	if len(tools) == 0 {
+		return nil
+	}
+	out := make([]wireTool, len(tools))
+	for i, t := range tools {
+		out[i].Type = t.Type
+		out[i].Function.Name = t.Function.Name
+		out[i].Function.Description = t.Function.Description
+		out[i].Function.Parameters = t.Function.Parameters
+	}
+	return out
 }
 
 type chatResp struct {
@@ -293,8 +341,10 @@ type chatResp struct {
 			Content string `json:"content"`
 			// ReasoningContent carries a reasoning-capable model's (e.g.
 			// Gemma's) chain-of-thought text, kept separate from Content.
-			ReasoningContent string `json:"reasoning_content"`
+			ReasoningContent string         `json:"reasoning_content"`
+			ToolCalls        []wireToolCall `json:"tool_calls"`
 		} `json:"message"`
+		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
 	Usage struct {
 		CompletionTokens int `json:"completion_tokens"`
@@ -304,6 +354,17 @@ type chatResp struct {
 	} `json:"timings"`
 }
 
+func fromWireToolCalls(calls []wireToolCall) []backend.ToolCall {
+	if len(calls) == 0 {
+		return nil
+	}
+	out := make([]backend.ToolCall, len(calls))
+	for i, c := range calls {
+		out[i] = backend.ToolCall{ID: c.ID, Name: c.Function.Name, Arguments: c.Function.Arguments}
+	}
+	return out
+}
+
 // toChatMessages converts the backend message list into the wire shape. With no
 // image, every turn's Content is a plain string. With an image, the last user
 // turn's Content becomes a []contentPart: its text followed by an image_url
@@ -311,7 +372,22 @@ type chatResp struct {
 func toChatMessages(req backend.Request) []chatMessage {
 	out := make([]chatMessage, len(req.Messages))
 	for i, m := range req.Messages {
-		out[i] = chatMessage{Role: m.Role, Content: m.Content}
+		out[i] = chatMessage{
+			Role:       m.Role,
+			Content:    m.Content,
+			ToolCallID: m.ToolCallID,
+			Name:       m.Name,
+		}
+		if len(m.ToolCalls) > 0 {
+			calls := make([]wireToolCall, len(m.ToolCalls))
+			for j, c := range m.ToolCalls {
+				calls[j].ID = c.ID
+				calls[j].Type = "function"
+				calls[j].Function.Name = c.Name
+				calls[j].Function.Arguments = c.Arguments
+			}
+			out[i].ToolCalls = calls
+		}
 	}
 	if len(req.ImageData) == 0 {
 		return out
@@ -345,6 +421,7 @@ func chatComplete(ctx context.Context, baseURL string, req backend.Request) (bac
 		Temperature:    req.Temperature,
 		Stream:         false,
 		ResponseFormat: req.ResponseFormat,
+		Tools:          toWireTools(req.Tools),
 	}
 	if body.MaxTokens == 0 {
 		body.MaxTokens = defaultChatMaxTokens
@@ -392,6 +469,8 @@ func chatComplete(ctx context.Context, baseURL string, req backend.Request) (bac
 		Reasoning:       cr.Choices[0].Message.ReasoningContent,
 		TokensGenerated: cr.Usage.CompletionTokens,
 		TokPerSecSample: tokPerSec,
+		ToolCalls:       fromWireToolCalls(cr.Choices[0].Message.ToolCalls),
+		LengthLimited:   cr.Choices[0].FinishReason == "length",
 	}, nil
 }
 
@@ -403,6 +482,14 @@ type chatStreamChunk struct {
 			// Gemma's) chain-of-thought text, streamed separately from
 			// Content — see backend.ChunkReasoning.
 			ReasoningContent string `json:"reasoning_content"`
+			// ToolCalls carries an incremental fragment of one or more tool
+			// calls the model is emitting — verified live against the real
+			// model that "id"/"function.name" arrive once, on the first
+			// fragment for a given Index, and "function.arguments" arrives
+			// character-by-character across many subsequent chunks. Never
+			// passed to chunkFn (see streamToolCallAccumulator) — there is
+			// nothing legible to show a user in a lone `"query` fragment.
+			ToolCalls []streamToolCallDelta `json:"tool_calls"`
 		} `json:"delta"`
 		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
@@ -414,8 +501,64 @@ type chatStreamChunk struct {
 	} `json:"timings"`
 }
 
+// streamToolCallDelta is one incremental fragment of a streamed tool call.
+// Index identifies which call a fragment belongs to when the model streams
+// more than one in parallel; ID and Function.Name are populated only on the
+// fragment that starts a given Index, while Function.Arguments accumulates
+// across every fragment for that Index.
+type streamToolCallDelta struct {
+	Index    int    `json:"index"`
+	ID       string `json:"id"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
+
+// streamToolCallAccumulator collects streamed tool-call fragments (keyed by
+// Index, in first-seen order) into complete backend.ToolCall values. Needed
+// because a single call's JSON arguments arrive split across many SSE
+// chunks — see streamToolCallDelta.
+type streamToolCallAccumulator struct {
+	order []int
+	byIdx map[int]*backend.ToolCall
+}
+
+func (a *streamToolCallAccumulator) add(d streamToolCallDelta) {
+	if a.byIdx == nil {
+		a.byIdx = make(map[int]*backend.ToolCall)
+	}
+	call, ok := a.byIdx[d.Index]
+	if !ok {
+		call = &backend.ToolCall{}
+		a.byIdx[d.Index] = call
+		a.order = append(a.order, d.Index)
+	}
+	if d.ID != "" {
+		call.ID = d.ID
+	}
+	if d.Function.Name != "" {
+		call.Name = d.Function.Name
+	}
+	call.Arguments += d.Function.Arguments
+}
+
+func (a *streamToolCallAccumulator) result() []backend.ToolCall {
+	if len(a.order) == 0 {
+		return nil
+	}
+	out := make([]backend.ToolCall, len(a.order))
+	for i, idx := range a.order {
+		out[i] = *a.byIdx[idx]
+	}
+	return out
+}
+
 // chatCompleteStream streams /v1/chat/completions, calling chunkFn per delta,
-// tagged as ChunkContent or ChunkReasoning.
+// tagged as ChunkContent or ChunkReasoning. Tool-call fragments are never
+// passed to chunkFn — they accumulate into the returned Response.ToolCalls
+// instead, exactly like chatComplete's non-streaming ToolCalls (see
+// streamToolCallAccumulator).
 func chatCompleteStream(ctx context.Context, baseURL string, req backend.Request, chunkFn func(kind backend.ChunkKind, delta string)) (backend.Response, error) {
 	body := struct {
 		chatReq
@@ -428,6 +571,7 @@ func chatCompleteStream(ctx context.Context, baseURL string, req backend.Request
 			Temperature:    req.Temperature,
 			Stream:         true,
 			ResponseFormat: req.ResponseFormat,
+			Tools:          toWireTools(req.Tools),
 		},
 		StreamOptions: map[string]bool{"include_usage": true},
 	}
@@ -465,6 +609,8 @@ func chatCompleteStream(ctx context.Context, baseURL string, req backend.Request
 	var tokens int
 	var predictedMS float64
 	var reasoning strings.Builder
+	var toolCalls streamToolCallAccumulator
+	var lengthLimited bool
 	for scanner.Scan() {
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data: ") {
@@ -485,6 +631,12 @@ func chatCompleteStream(ctx context.Context, baseURL string, req backend.Request
 			if r := chunk.Choices[0].Delta.ReasoningContent; r != "" {
 				reasoning.WriteString(r)
 				chunkFn(backend.ChunkReasoning, r)
+			}
+			for _, d := range chunk.Choices[0].Delta.ToolCalls {
+				toolCalls.add(d)
+			}
+			if fr := chunk.Choices[0].FinishReason; fr != nil && *fr == "length" {
+				lengthLimited = true
 			}
 		}
 		if chunk.Usage.CompletionTokens > 0 {
@@ -511,6 +663,8 @@ func chatCompleteStream(ctx context.Context, baseURL string, req backend.Request
 		Reasoning:       reasoning.String(),
 		TokensGenerated: tokens,
 		TokPerSecSample: tokPerSec,
+		ToolCalls:       toolCalls.result(),
+		LengthLimited:   lengthLimited,
 	}, nil
 }
 

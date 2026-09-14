@@ -29,6 +29,29 @@ type InferResponse struct {
 	// Deferred is true if this request was held in the local defer queue
 	// before being served.
 	Deferred bool `json:"deferred,omitempty"`
+	// ToolCalls lists the tool(s) the model invoked while producing this
+	// answer, in the order they were resolved. Empty when the request carried
+	// no tools, or the model chose not to call any. Observability only — the
+	// tool round-trip already happened server-side; Output is the final,
+	// grounded answer.
+	ToolCalls []ToolCallSummary `json:"tool_calls,omitempty"`
+	// Truncated is true when the model was still generating when it hit its
+	// max_tokens budget (llama-server's finish_reason "length") — Output is
+	// genuine model text but ends mid-thought rather than at a natural stop.
+	// This is not an error: the request succeeded and Output should be kept,
+	// just flagged as incomplete.
+	Truncated bool `json:"truncated,omitempty"`
+}
+
+// ToolCallSummary reports one resolved tool invocation for observability.
+type ToolCallSummary struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+	// Error is set when the tool could not be resolved (e.g. the search
+	// backend was unreachable, or the model named an unknown tool) — the
+	// model still received a result (an error string) and produced Output
+	// from it, so the request as a whole did not fail.
+	Error string `json:"error,omitempty"`
 }
 
 // StreamChunk is one Server-Sent Event payload for streaming responses.
@@ -65,6 +88,14 @@ type StreamChunk struct {
 	// normal Done (persist what streamed) while surfacing that it was cut
 	// short, rather than discarding the turn as it would on Error.
 	Truncated bool `json:"truncated,omitempty"`
+	// ToolCall is set on one notification chunk when the model, mid-stream,
+	// calls a tool the request offered (only when the request carried
+	// tools) — emitted after the first hop resolves and before the second
+	// hop's Delta/Reasoning chunks begin, so a client can render a
+	// "searching the web…" state. Singular (unlike InferResponse.ToolCalls'
+	// plural array) because each notification chunk reports exactly one
+	// resolved call.
+	ToolCall *ToolCallSummary `json:"tool_call,omitempty"`
 }
 
 // PressureSnapshot is the response body for GET /v1/status/pressure.

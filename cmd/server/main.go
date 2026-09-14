@@ -32,6 +32,7 @@ import (
 	"github.com/ngkaichong/home-inference-server/internal/server"
 	isystem "github.com/ngkaichong/home-inference-server/internal/system"
 	"github.com/ngkaichong/home-inference-server/internal/tray"
+	"github.com/ngkaichong/home-inference-server/internal/websearch"
 	"github.com/ngkaichong/home-inference-server/logschema"
 	"github.com/ngkaichong/home-inference-server/types"
 )
@@ -56,7 +57,7 @@ func loadConfig() appConfig {
 	return cfg
 }
 
-const version = "0.12.0"
+const version = "0.13.0"
 
 // defaultMaxParallel is the concurrent-inference degree: llama-server's
 // --parallel N, the vram.Backend semaphore capacity, and the dispatcher's
@@ -326,6 +327,8 @@ func main() {
 	if inferTOMS := envInt("HIS_INFER_TIMEOUT_MS", 0); inferTOMS > 0 {
 		srv.SetInferTimeout(time.Duration(inferTOMS) * time.Millisecond)
 	}
+
+	srv.SetToolSearcher(websearch.NewClient(10 * time.Second))
 
 	chatsDir := flagChatsDir
 	if chatsDir == "" {

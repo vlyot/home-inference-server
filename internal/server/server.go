@@ -117,6 +117,8 @@ type Server struct {
 	describer Describer // may be nil; when nil /v1/describe 501
 	logs      LogSource // may be nil; when nil /v1/logs 501
 
+	toolSearcher ToolSearcher // may be nil; when nil web_search tool calls get ErrCodeToolUnavailable
+
 	// draining, when set (POST /v1/admin/drain), makes handleInfer reject new
 	// work with 503 draining. Read-only endpoints are unaffected.
 	draining atomic.Bool
@@ -335,6 +337,22 @@ func (s *Server) handleInfer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if len(req.Tools) > 0 {
+		// The vision tier's chat template has no tool-calling grammar (see
+		// roadmap.md) — reject rather than silently ignoring the caller's tools.
+		if req.Modality == api.ModalityVision {
+			writeError(w, http.StatusBadRequest, api.ErrCodeToolNotSupported, "tools are not supported with vision_input", req.CorrelationID)
+			return
+		}
+		// Tools ride the chat-completions path, which requires a message list —
+		// a bare text_input.prompt has no chat template to attach tool
+		// declarations to.
+		if req.TextInput == nil || len(req.TextInput.Messages) == 0 {
+			writeError(w, http.StatusBadRequest, api.ErrCodeInvalidRequest, "tools requires text_input.messages", req.CorrelationID)
+			return
+		}
+	}
+
 	requestID := strings.ReplaceAll(uuid.New().String(), "-", "")
 	backendReq := TranslateInferRequest(req, requestID)
 
@@ -349,10 +367,18 @@ func (s *Server) handleInfer(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	r = r.WithContext(ctx)
 
-	// Branch to streaming path (bypasses queue/batcher) or blocking path.
-	if req.Stream {
+	// Branch to the tool-calling orchestration path (bypasses queue/batcher,
+	// same reason as streaming: a multi-step interaction with the backend
+	// doesn't fit the single-job queue model), streaming path, or blocking
+	// path. Stream is checked first: a request with both Tools and Stream
+	// set must reach handleInferStream (which itself delegates to
+	// handleInferStreamWithTools) rather than the blocking tools handler.
+	switch {
+	case req.Stream:
 		s.handleInferStream(w, r, req, backendReq)
-	} else {
+	case len(req.Tools) > 0:
+		s.handleInferWithTools(w, r, req, backendReq)
+	default:
 		s.handleInferBlocking(w, r, req, backendReq)
 	}
 }
@@ -569,7 +595,27 @@ func TranslateInferRequest(req api.InferRequest, requestID string) backend.Reque
 		PreferredTier:  req.PreferredTier,
 		Stream:         req.Stream,
 		ResponseFormat: req.ResponseFormat,
+		Tools:          translateTools(req.Tools),
 	}
+}
+
+// translateTools copies the API tool list into the backend shape.
+func translateTools(tools []api.Tool) []backend.Tool {
+	if len(tools) == 0 {
+		return nil
+	}
+	out := make([]backend.Tool, len(tools))
+	for i, t := range tools {
+		out[i] = backend.Tool{
+			Type: t.Type,
+			Function: backend.ToolFunction{
+				Name:        t.Function.Name,
+				Description: t.Function.Description,
+				Parameters:  t.Function.Parameters,
+			},
+		}
+	}
+	return out
 }
 
 // translateMessages copies the API message list into the backend shape,
@@ -791,5 +837,6 @@ func (s *Server) handleInferBlocking(w http.ResponseWriter, r *http.Request, req
 		DurationMS:      durationMS,
 		ModelTier:       result.ModelTier,
 		FinishedAt:      finishedAt,
+		Truncated:       result.LengthLimited,
 	})
 }

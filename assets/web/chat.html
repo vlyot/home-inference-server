@@ -200,6 +200,13 @@
     color: #71717a;
   }
 
+  .searching-note {
+    max-width: 72ch;
+    margin-bottom: 6px;
+    font-size: 12px;
+    color: #71717a;
+  }
+
   .typing .bubble::after {
     content: "···";
     letter-spacing: 2px;
@@ -386,6 +393,28 @@
   // before rendering the text and re-adds the note instead).
   const TRUNCATED_SUFFIX = '\n\n[response cut short]';
 
+  // Offered on every text turn so the model can ground an answer in current
+  // information when it judges the question needs it — the model decides
+  // per-turn whether to actually call it. Description is deliberately biased
+  // toward searching: a vague "search the web" description left the model
+  // under-using the tool even on clearly time-sensitive questions.
+  const WEB_SEARCH_TOOL = {
+    type: 'function',
+    function: {
+      name: 'web_search',
+      description: 'Search the web for up-to-date information. Use this ' +
+        'whenever the question could involve anything that may have ' +
+        'changed after your training cutoff — news, scores, prices, ' +
+        'releases, current events, or anything time-sensitive — even if ' +
+        'you think you might already know the answer. When in doubt, search.',
+      parameters: {
+        type: 'object',
+        properties: { query: { type: 'string' } },
+        required: ['query'],
+      },
+    },
+  };
+
   const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 
   function stageImage(file) {
@@ -571,15 +600,15 @@
     let sawTruncated = false;
 
     // Lazily inserts (once) the collapsible "Thinking…" block right before
-    // the typing/answer bubble, open while streaming so reasoning is visible
-    // as it arrives, matching llama-server's own chat UI.
+    // the typing/answer bubble. Always starts collapsed — the user can open
+    // it manually to watch reasoning arrive live, but it never auto-expands,
+    // regardless of whether an earlier turn's block was left open.
     function ensureThinkingBlock() {
       if (thinkingBody) return;
       const empty = $('thread').querySelector('.thread-empty');
       if (empty) empty.remove();
       const details = document.createElement('details');
       details.className = 'thinking';
-      details.open = true;
       const summary = document.createElement('summary');
       summary.textContent = 'Thinking…';
       thinkingBody = document.createElement('div');
@@ -587,6 +616,20 @@
       details.appendChild(summary);
       details.appendChild(thinkingBody);
       $('thread').insertBefore(details, typing);
+      $('thread').scrollTop = $('thread').scrollHeight;
+    }
+
+    // Shows a one-line "Searching the web for: <query>" note when the model
+    // calls web_search, mirroring ensureThinkingBlock's insertion point.
+    // Unlike the thinking block, this has no live-updating body — a tool
+    // call resolves in one notification chunk, not a stream of deltas.
+    function showSearchingNote(query) {
+      const empty = $('thread').querySelector('.thread-empty');
+      if (empty) empty.remove();
+      const note = document.createElement('div');
+      note.className = 'searching-note';
+      note.textContent = '🔎 Searching the web for: ' + query;
+      $('thread').insertBefore(note, typing);
       $('thread').scrollTop = $('thread').scrollHeight;
     }
 
@@ -598,6 +641,7 @@
           modality: 'text',
           text_input: { messages },
           stream: true,
+          tools: [WEB_SEARCH_TOOL],
           preferred_tier: preferredTier || undefined,
         }),
       });
@@ -620,6 +664,11 @@
           try { chunk = JSON.parse(payload); } catch (e) { continue; }
           if (chunk.error) { sawError = true; throw new Error(errorText(chunk.error)); }
           if (chunk.truncated) sawTruncated = true;
+          if (chunk.tool_call) {
+            let query = chunk.tool_call.name;
+            try { query = JSON.parse(chunk.tool_call.arguments).query || query; } catch (e) { /* show the raw name */ }
+            showSearchingNote(query);
+          }
           if (chunk.reasoning) {
             ensureThinkingBlock();
             reasoningAcc += chunk.reasoning;

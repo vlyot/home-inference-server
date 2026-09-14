@@ -74,6 +74,23 @@ const (
 	// unsupported construct). Returned as HTTP 400 — the caller must fix the
 	// schema.
 	ErrCodeInvalidGrammar = "invalid_grammar"
+	// ErrCodeToolUnavailable marks a tool call that could not be resolved
+	// because its backend (e.g. the Tavily search API) was unreachable or
+	// returned an unexpected error. The request itself does not fail: the
+	// model receives an error string as the tool result and gets a chance to
+	// say so in its answer.
+	ErrCodeToolUnavailable = "tool_unavailable"
+	// ErrCodeToolNotSupported marks a request whose modality/tier has no
+	// tool-calling chat template (currently: any request with vision_input) —
+	// returned as HTTP 400, the caller must drop tools or the image.
+	ErrCodeToolNotSupported = "tool_not_supported"
+	// ErrCodeToolRateLimited marks a tool call whose backend responded with a
+	// rate-limit error (e.g. Tavily's keyless access cap — HTTP 429). Distinct
+	// from ErrCodeToolUnavailable because the remedy differs: wait, or add a
+	// free API key, rather than "the backend is down". Like the other tool_*
+	// codes, this never fails the request — it appears only inside a resolved
+	// tool_calls[].error field.
+	ErrCodeToolRateLimited = "tool_rate_limited"
 )
 
 const (

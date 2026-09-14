@@ -18,9 +18,10 @@ import (
 // it emits each delta in deltas (as ChunkContent) then each entry in reasoning
 // (as ChunkReasoning), then reports tokens as TokensGenerated.
 type streamStub struct {
-	deltas    []string
-	reasoning []string
-	tokens    int
+	deltas        []string
+	reasoning     []string
+	tokens        int
+	lengthLimited bool
 }
 
 func (s *streamStub) Modality() backend.ModalityKind   { return backend.ModalityKindText }
@@ -32,6 +33,7 @@ func (s *streamStub) Infer(_ context.Context, _ backend.Request) (backend.Respon
 		Reasoning:       strings.Join(s.reasoning, ""),
 		TokensGenerated: s.tokens,
 		ModelTier:       "weak",
+		LengthLimited:   s.lengthLimited,
 	}, nil
 }
 func (s *streamStub) InferStream(_ context.Context, _ backend.Request, chunkFn func(backend.ChunkKind, string)) (backend.Response, error) {
@@ -41,7 +43,7 @@ func (s *streamStub) InferStream(_ context.Context, _ backend.Request, chunkFn f
 	for _, d := range s.deltas {
 		chunkFn(backend.ChunkContent, d)
 	}
-	return backend.Response{TokensGenerated: s.tokens, ModelTier: "weak"}, nil
+	return backend.Response{TokensGenerated: s.tokens, ModelTier: "weak", LengthLimited: s.lengthLimited}, nil
 }
 
 // crashMidStreamStub emits deltas (real content), then returns an error — the
@@ -156,6 +158,49 @@ func TestStreamNormalOutputStillEndsWithSuccessChunk(t *testing.T) {
 	}
 	if done.TokensGenerated != 2 {
 		t.Errorf("tokens_generated = %d; want 2", done.TokensGenerated)
+	}
+}
+
+// TestStreamLengthLimitedSurfacesAsTruncatedWithNoError guards a real user
+// report: a chat UI answer stopped mid-sentence with the server logging a
+// completely clean "job done" (no error, no crash) — because
+// llama-server's finish_reason:"length" (the model hit its max_tokens budget
+// while still generating) was parsed off the wire but never read anywhere,
+// so a cut-short answer was indistinguishable from a normal one end-to-end.
+// This asserts a length-limited stream still delivers all its deltas and
+// ends with Truncated=true and no Error — same client-visible contract as
+// the crash-salvage path, but reached with a perfectly healthy backend call.
+func TestStreamLengthLimitedSurfacesAsTruncatedWithNoError(t *testing.T) {
+	stub := &streamStub{deltas: []string{"The answer starts ", "and then stops"}, tokens: 8, lengthLimited: true}
+	h := streamHarnessWithBackend(t, stub)
+
+	resp := post(t, h.ts.URL+api.PathInfer, api.InferRequest{
+		Modality:  api.ModalityText,
+		TextInput: &api.TextInput{Messages: []api.ChatMessage{{Role: "user", Content: "hi"}}},
+		Stream:    true,
+	})
+	defer resp.Body.Close()
+
+	chunks := readSSEChunks(t, resp)
+	if len(chunks) < 3 {
+		t.Fatalf("want 2 delta chunks + a terminal chunk, got %d: %+v", len(chunks), chunks)
+	}
+	var gotDeltas string
+	for _, c := range chunks[:len(chunks)-1] {
+		gotDeltas += c.Delta
+	}
+	if gotDeltas != "The answer starts and then stops" {
+		t.Errorf("deltas received = %q; want all partial content preserved", gotDeltas)
+	}
+	last := chunks[len(chunks)-1]
+	if !last.Done {
+		t.Error("terminal chunk not marked done")
+	}
+	if last.Error != "" {
+		t.Errorf("terminal chunk Error = %q; want empty — a length cutoff is not a request failure", last.Error)
+	}
+	if !last.Truncated {
+		t.Error("terminal chunk Truncated = false; want true so the client can flag the cutoff")
 	}
 }
 

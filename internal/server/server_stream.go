@@ -16,8 +16,14 @@ import (
 // handleInferStream handles POST /v1/infer when req.Stream == true.
 // It bypasses the queue/batcher and proxies SSE chunks directly from the
 // backend to the client. Falls back to non-streaming if the backend does not
-// implement backend.Streamer.
+// implement backend.Streamer. When req.Tools is set, delegates entirely to
+// handleInferStreamWithTools instead (a different two-hop call shape).
 func (s *Server) handleInferStream(w http.ResponseWriter, r *http.Request, req api.InferRequest, backendReq backend.Request) {
+	if len(req.Tools) > 0 {
+		s.handleInferStreamWithTools(w, r, req, backendReq)
+		return
+	}
+
 	// Under pressure, hand the request to the durable relay and return 202
 	// (not an SSE stream — the caller polls the relay's /result/{id}).
 	if s.deferToRelay(w, r, req, backendReq) {
@@ -258,7 +264,19 @@ func (s *Server) handleInferStream(w http.ResponseWriter, r *http.Request, req a
 		InferenceMS:     inferenceMS,
 		DurationMS:      durationMS,
 		ModelTier:       resp.ModelTier,
+		Truncated:       resp.LengthLimited,
 	})
+
+	if resp.LengthLimited {
+		slog.Info("job length-limited (stream)",
+			slog.String(logschema.FieldEvent, string(logschema.EventJobDone)),
+			slog.String(logschema.FieldCorrelationID, req.CorrelationID),
+			slog.String(logschema.FieldRequestID, backendReq.RequestID),
+			slog.Int64(logschema.FieldDurationMS, durationMS),
+			slog.Int(logschema.FieldTokensGenerated, resp.TokensGenerated),
+			slog.String(logschema.FieldModelTier, resp.ModelTier),
+		)
+	}
 
 	slog.Info("job done (stream)",
 		slog.String(logschema.FieldEvent, string(logschema.EventJobDone)),
@@ -267,6 +285,215 @@ func (s *Server) handleInferStream(w http.ResponseWriter, r *http.Request, req a
 		slog.Int64(logschema.FieldDurationMS, durationMS),
 		slog.Int(logschema.FieldTokensGenerated, resp.TokensGenerated),
 		slog.String(logschema.FieldModelTier, resp.ModelTier),
+	)
+
+	s.recordJob(types.JobEntry{
+		RequestID:       backendReq.RequestID,
+		CorrelationID:   req.CorrelationID,
+		Source:          types.JobSourceLocal,
+		Status:          types.JobStatusDone,
+		Modality:        string(req.Modality),
+		ModelTier:       resp.ModelTier,
+		Priority:        req.Priority,
+		MinTier:         req.MinTier,
+		EnqueuedAt:      enqueuedAt,
+		StartedAt:       startedAt,
+		FinishedAt:      finishedAt,
+		DurationMS:      durationMS,
+		QueueWaitMS:     queueWaitMS,
+		InferenceMS:     inferenceMS,
+		TokensGenerated: resp.TokensGenerated,
+	})
+}
+
+// handleInferStreamWithTools handles POST /v1/infer when both req.Stream and
+// req.Tools are set. Structured like handleInferStream (SSE headers, the
+// same writeSSEChunk/writeDone closures, the same recordJob/slog shape) but
+// calls runWithToolsStream instead of streamer.InferStream directly — see
+// that function's doc comment for why the same chunkFn safely handles both
+// hops with no buffering. Emits one extra StreamChunk carrying ToolCall
+// (a ToolCallSummary) for each tool the model resolves, before that hop's
+// content/reasoning chunks.
+func (s *Server) handleInferStreamWithTools(w http.ResponseWriter, r *http.Request, req api.InferRequest, backendReq backend.Request) {
+	if s.deferToRelay(w, r, req, backendReq) {
+		return
+	}
+
+	s.backendsMu.RLock()
+	b, ok := s.backends[backend.ModalityKind(req.Modality)]
+	s.backendsMu.RUnlock()
+
+	streamer, canStream := b.(backend.Streamer)
+	if !ok || !canStream {
+		s.handleInferWithTools(w, r, req, backendReq)
+		return
+	}
+
+	flusher, canFlush := w.(http.Flusher)
+	if !canFlush {
+		s.handleInferWithTools(w, r, req, backendReq)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	enqueuedAt := time.Now()
+
+	slog.Info("job queued (stream)",
+		slog.String(logschema.FieldEvent, string(logschema.EventJobQueued)),
+		slog.String(logschema.FieldCorrelationID, req.CorrelationID),
+		slog.String(logschema.FieldRequestID, backendReq.RequestID),
+	)
+
+	startedAt := time.Now()
+
+	writeSSEChunk := func(v any) {
+		data, _ := json.Marshal(v)
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		flusher.Flush()
+	}
+	writeDone := func(chunk api.StreamChunk) {
+		chunk.Done = true
+		writeSSEChunk(chunk)
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}
+
+	contentEmitted := false
+	reasoningEmitted := false
+	resp, toolCalls, err := s.runWithToolsStream(r.Context(), streamer, backendReq, func(kind backend.ChunkKind, delta string) {
+		chunk := api.StreamChunk{
+			RequestID:     backendReq.RequestID,
+			CorrelationID: req.CorrelationID,
+		}
+		if kind == backend.ChunkReasoning {
+			reasoningEmitted = true
+			chunk.Reasoning = delta
+		} else {
+			contentEmitted = true
+			chunk.Delta = delta
+		}
+		writeSSEChunk(chunk)
+	}, func(summary api.ToolCallSummary) {
+		writeSSEChunk(api.StreamChunk{
+			RequestID:     backendReq.RequestID,
+			CorrelationID: req.CorrelationID,
+			ToolCall:      &summary,
+		})
+	})
+
+	finishedAt := time.Now()
+	durationMS := finishedAt.Sub(enqueuedAt).Milliseconds()
+	queueWaitMS := startedAt.Sub(enqueuedAt).Milliseconds()
+	inferenceMS := finishedAt.Sub(startedAt).Milliseconds()
+
+	if err != nil {
+		var be *backend.BackendError
+		errCode := api.ErrCodeInternal
+		if isBackendErr(err, &be) {
+			errCode = be.Code
+		}
+		slog.Info("job failed (stream)",
+			slog.String(logschema.FieldEvent, string(logschema.EventJobFailed)),
+			slog.String(logschema.FieldCorrelationID, req.CorrelationID),
+			slog.String(logschema.FieldRequestID, backendReq.RequestID),
+			slog.String(logschema.FieldErrorCode, errCode),
+		)
+		s.recordJob(types.JobEntry{
+			RequestID:     backendReq.RequestID,
+			CorrelationID: req.CorrelationID,
+			Source:        types.JobSourceLocal,
+			Status:        types.JobStatusFailed,
+			Modality:      string(req.Modality),
+			Priority:      req.Priority,
+			MinTier:       req.MinTier,
+			EnqueuedAt:    enqueuedAt,
+			StartedAt:     startedAt,
+			FinishedAt:    finishedAt,
+			DurationMS:    durationMS,
+			QueueWaitMS:   queueWaitMS,
+			InferenceMS:   inferenceMS,
+		})
+		writeDone(api.StreamChunk{
+			RequestID:     backendReq.RequestID,
+			CorrelationID: req.CorrelationID,
+			Error:         errCode,
+		})
+		return
+	}
+
+	if !contentEmitted {
+		errCode := api.ErrCodeInternal
+		if reasoningEmitted {
+			errCode = api.ErrCodeReasoningExhausted
+		}
+		slog.Info("job failed (stream)",
+			slog.String(logschema.FieldEvent, string(logschema.EventJobFailed)),
+			slog.String(logschema.FieldCorrelationID, req.CorrelationID),
+			slog.String(logschema.FieldRequestID, backendReq.RequestID),
+			slog.String(logschema.FieldErrorCode, errCode),
+		)
+		s.recordJob(types.JobEntry{
+			RequestID:     backendReq.RequestID,
+			CorrelationID: req.CorrelationID,
+			Source:        types.JobSourceLocal,
+			Status:        types.JobStatusFailed,
+			Modality:      string(req.Modality),
+			ModelTier:     resp.ModelTier,
+			Priority:      req.Priority,
+			MinTier:       req.MinTier,
+			EnqueuedAt:    enqueuedAt,
+			StartedAt:     startedAt,
+			FinishedAt:    finishedAt,
+			DurationMS:    durationMS,
+			QueueWaitMS:   queueWaitMS,
+			InferenceMS:   inferenceMS,
+		})
+		writeDone(api.StreamChunk{
+			RequestID:     backendReq.RequestID,
+			CorrelationID: req.CorrelationID,
+			Error:         errCode,
+		})
+		return
+	}
+
+	if resp.QualityDegraded {
+		w.Header().Set(api.HeaderQualityDegraded, "true")
+	}
+
+	writeDone(api.StreamChunk{
+		RequestID:       backendReq.RequestID,
+		CorrelationID:   req.CorrelationID,
+		TokensGenerated: resp.TokensGenerated,
+		TokensPerSec:    resp.TokPerSecSample,
+		QueueWaitMS:     queueWaitMS,
+		InferenceMS:     inferenceMS,
+		DurationMS:      durationMS,
+		ModelTier:       resp.ModelTier,
+		Truncated:       resp.LengthLimited,
+	})
+
+	if resp.LengthLimited {
+		slog.Info("job length-limited (stream)",
+			slog.String(logschema.FieldEvent, string(logschema.EventJobDone)),
+			slog.String(logschema.FieldCorrelationID, req.CorrelationID),
+			slog.String(logschema.FieldRequestID, backendReq.RequestID),
+			slog.Int64(logschema.FieldDurationMS, durationMS),
+			slog.Int(logschema.FieldTokensGenerated, resp.TokensGenerated),
+			slog.String(logschema.FieldModelTier, resp.ModelTier),
+		)
+	}
+
+	slog.Info("job done (stream)",
+		slog.String(logschema.FieldEvent, string(logschema.EventJobDone)),
+		slog.String(logschema.FieldCorrelationID, req.CorrelationID),
+		slog.String(logschema.FieldRequestID, backendReq.RequestID),
+		slog.Int64(logschema.FieldDurationMS, durationMS),
+		slog.Int(logschema.FieldTokensGenerated, resp.TokensGenerated),
+		slog.String(logschema.FieldModelTier, resp.ModelTier),
+		slog.Int("tool_calls", len(toolCalls)),
 	)
 
 	s.recordJob(types.JobEntry{

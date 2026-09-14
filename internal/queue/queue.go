@@ -17,6 +17,10 @@ type Result struct {
 	TokPerSecSample float64
 	StartedAt       time.Time
 	Err             error
+	// LengthLimited is true when the model hit its max_tokens budget
+	// (finish_reason "length") rather than reaching a natural stop — Output
+	// is genuine text but ends mid-thought. See backend.Response.LengthLimited.
+	LengthLimited bool
 }
 
 // Job is one unit of work flowing through the pipeline.
