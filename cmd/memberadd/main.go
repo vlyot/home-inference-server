@@ -1,18 +1,22 @@
-// Command memberadd manages the relay's friends-and-family invite list.
-// Neon Auth (Stack Auth) lets anyone create an account; only Stack Auth user
-// ids present in allowed_members may use the relay.
+// Command memberadd manages the relay's friends-and-family invite list. It
+// is the only way an account comes into existence — no client app exposes
+// its own sign-up screen. memberadd creates the Stack Auth account directly
+// (via the server-side admin API) and adds it to allowed_members in one step.
 //
-//	memberadd -email you@example.com            # invite (must have signed in once)
+//	memberadd -email you@example.com            # provision + invite
 //	memberadd -email you@example.com -remove    # revoke
 //	memberadd -list
 //
-// DATABASE_URL must point at the same Neon database the relay uses (the one
-// Neon Auth syncs users into as neon_auth.users_sync).
+// DATABASE_URL must point at the same Neon database the relay uses.
+// STACK_PROJECT_ID and STACK_SECRET_SERVER_KEY authenticate the account
+// creation call against Stack Auth's server API.
 package main
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"os"
@@ -21,6 +25,7 @@ import (
 	_ "github.com/lib/pq"
 
 	"github.com/ngkaichong/home-inference-server/internal/railwayq"
+	"github.com/ngkaichong/home-inference-server/internal/stackauth"
 )
 
 const ensureTable = `
@@ -33,7 +38,7 @@ ALTER TABLE allowed_members ADD COLUMN IF NOT EXISTS username TEXT;
 ALTER TABLE allowed_members ADD COLUMN IF NOT EXISTS display_name TEXT;`
 
 func main() {
-	email := flag.String("email", "", "member email (must have signed in via Neon Auth at least once)")
+	email := flag.String("email", "", "member email (an account is created if one doesn't already exist)")
 	username := flag.String("username", "", "member username (admin-set; blank leaves any existing value unchanged)")
 	name := flag.String("name", "", "member display name (admin-set; blank leaves any existing value unchanged)")
 	remove := flag.Bool("remove", false, "remove the member instead of adding")
@@ -98,20 +103,33 @@ func main() {
 		return
 	}
 
-	// Resolve the Stack Auth user id from the synced directory.
-	var stackID string
-	err = db.QueryRowContext(ctx,
-		`SELECT id FROM neon_auth.users_sync WHERE lower(email) = lower($1) AND deleted_at IS NULL`,
-		*email,
-	).Scan(&stackID)
-	if err == sql.ErrNoRows {
-		fmt.Fprintf(os.Stderr,
-			"no Neon Auth user for %s — they must sign in once before being invited\n", *email)
+	projectID := os.Getenv("STACK_PROJECT_ID")
+	secretKey := os.Getenv("STACK_SECRET_SERVER_KEY")
+	if projectID == "" || secretKey == "" {
+		fmt.Fprintln(os.Stderr, "error: STACK_PROJECT_ID and STACK_SECRET_SERVER_KEY are required")
 		os.Exit(1)
 	}
+	admin := stackauth.NewAdminClient(projectID, secretKey)
+
+	stackID, err := admin.FindUserByEmail(ctx, *email)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "lookup: %v\n", err)
 		os.Exit(1)
+	}
+	created := stackID == ""
+	if created {
+		tempPassword, err := randomPassword()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "generate password: %v\n", err)
+			os.Exit(1)
+		}
+		stackID, err = admin.CreateUser(ctx, *email, *name, tempPassword)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "create user: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("provisioned %s (stack_user_id=%s, temp password: %s)\n", *email, stackID, tempPassword)
+		fmt.Println("Give this password to the person directly — it is not stored or emailed.")
 	}
 
 	_, err = db.ExecContext(ctx, `
@@ -127,5 +145,18 @@ func main() {
 		fmt.Fprintf(os.Stderr, "insert: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("invited %s (stack_user_id=%s)\n", *email, stackID)
+	if !created {
+		fmt.Printf("invited %s (stack_user_id=%s)\n", *email, stackID)
+	}
+}
+
+// randomPassword returns a 24-byte cryptographically random password,
+// base64url-encoded, for a freshly provisioned account. It is printed once
+// and never stored — the person is expected to set their own on first use.
+func randomPassword() (string, error) {
+	b := make([]byte, 24)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
 }

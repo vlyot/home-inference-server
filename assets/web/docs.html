@@ -1307,7 +1307,8 @@ narrows this to tiers with a vision variant — currently only weak):</p>
 <p>Both resolve to an <em>identity</em> that scopes result retrieval and drives the per-identity rate limit and daily quota. Missing or invalid credentials return <code>401 unauthorized</code>; a valid Neon Auth token whose user has not been added to the relay's invite list returns <code>403</code>. Either way nothing is written first.</p>
 
 <h3>Wiring up an app</h3>
-<p>You do <strong>not</strong> deploy or proxy an auth server. Neon Auth (Stack Auth) hosts sign-in, the magic-link / OAuth email, token issuing, and token refresh at <code>api.stack-auth.com</code>. Your app talks to it directly with the client SDK; the relay only ever sees the finished token.</p>
+<p>You do <strong>not</strong> deploy or proxy an auth server. Neon Auth (Stack Auth) hosts sign-in, token issuing, and token refresh at <code>api.stack-auth.com</code>. Your app talks to it directly with the client SDK; the relay only ever sees the finished token.</p>
+<p><strong>Show sign-in only — never a sign-up screen.</strong> Every account is provisioned ahead of time by an admin via <code>memberadd</code> (see Membership below); there is no self-serve path. Render only the SDK's sign-in view (e.g. Stack Auth's <code>&lt;SignIn /&gt;</code>, not <code>&lt;SignUp /&gt;</code>), since anyone who could complete a sign-up form would get a working Stack Auth account with no relay access anyway.</p>
 
 <h4>1. Config the app needs</h4>
 <p>Both values are safe to ship in client-side code:</p>
@@ -1321,7 +1322,7 @@ narrows this to tiers with a vision variant — currently only weak):</p>
   </tbody>
 </table>
 </div>
-<p>The relay's own env (<code>STACK_JWKS_URL</code>, <code>STACK_PROJECT_ID</code>) is already set from these — nothing to configure per app on the relay side.</p>
+<p>The relay's own env (<code>STACK_JWKS_URL</code>, <code>STACK_PROJECT_ID</code>) is already set from these — nothing to configure per app on the relay side. A third value, <code>STACK_SECRET_SERVER_KEY</code>, is required only by <code>memberadd</code> (not the relay server itself) to provision accounts — see Membership below. It is a secret and must never be shipped client-side.</p>
 
 <h4>2. Install the SDK &amp; sign the user in</h4>
 <pre><code>npm install @stackframe/stack        # or the framework-specific Neon Auth package
@@ -1353,7 +1354,7 @@ const { accessToken } = await user.getAuthJson();</code></pre>
       payload: { modality: "text", text_input: { prompt } },
     }),
   });
-  if (enq.status === 403) throw new Error("you're not on the invite list yet");
+  if (enq.status === 403) throw new Error("ask the admin to add you via memberadd");
   const { id } = await enq.json();
 
   // poll until terminal
@@ -1421,13 +1422,16 @@ curl -H "Authorization: Bearer $TOKEN" https://&lt;relay&gt;/result/a1b2c3...
 
 <p>A <code>status</code> of <code>pending</code> for a while just means the PC is asleep — show "will process when the PC is back online" and keep polling. Results are purged from the relay ~1&nbsp;hour after completion.</p>
 
-<h3>Membership (invite-only)</h3>
-<p>Neon Auth's sign-up is open — anyone can create an account — but that alone gets a caller nothing. The relay rejects (<code>403 "not an invited member"</code>) any token whose Stack Auth user id is not in its <code>allowed_members</code> table. Neon Auth mirrors every account into the relay's database as <code>neon_auth.users_sync</code>; <code>memberadd</code> looks a person up there by email (so they must have signed in at least once) and adds them:</p>
-<pre><code>DATABASE_URL=… go run ./cmd/memberadd -email them@example.com                                # add
-DATABASE_URL=… go run ./cmd/memberadd -email them@example.com -username johnb -name "John B."  # add + set profile
-DATABASE_URL=… go run ./cmd/memberadd -email them@example.com -remove                          # revoke
-DATABASE_URL=… go run ./cmd/memberadd -list                                                    # show the list</code></pre>
-<p>Onboarding order for a new person: they open the app and sign in once → you run <code>memberadd -email …</code> → their next request succeeds.</p>
+<h3>Membership (invite-only, no self-serve sign-up)</h3>
+<p>No client app exposes a sign-up screen. <code>memberadd</code> is the only way an account comes into existence: it creates the Stack Auth account directly (via Stack Auth's server-side admin API, authenticated with a secret server key — not a database lookup) and adds it to the relay's <code>allowed_members</code> table in the same step. If nobody has run <code>memberadd</code> for a person, there is no account for them to sign into anywhere — client apps should only ever show a sign-<em>in</em> form.</p>
+<pre><code>DATABASE_URL=… STACK_PROJECT_ID=… STACK_SECRET_SERVER_KEY=… \
+  go run ./cmd/memberadd -email them@example.com                                # provision + invite
+DATABASE_URL=… STACK_PROJECT_ID=… STACK_SECRET_SERVER_KEY=… \
+  go run ./cmd/memberadd -email them@example.com -username johnb -name "John B."  # provision + set profile
+DATABASE_URL=… go run ./cmd/memberadd -email them@example.com -remove             # revoke
+DATABASE_URL=… go run ./cmd/memberadd -list                                       # show the list</code></pre>
+<p>On first invite for a new email, <code>memberadd</code> prints a generated temporary password once — hand it to the person directly (it is not stored or emailed). Re-running <code>memberadd</code> for an email that already has an account looks the existing account up by email and only updates <code>allowed_members</code> (username/display name, or just refreshing the row) — it never creates a second account.</p>
+<p>The relay itself still rejects (<code>403 "not an invited member"</code>) any token whose Stack Auth user id is not in <code>allowed_members</code> — that check is unchanged; only how an account comes to exist in the first place has changed.</p>
 
 <h3>Shared profile (username / display name)</h3>
 <p><code>allowed_members</code> also holds <code>username</code> and <code>display_name</code> — a lightweight shared identity for every client app built on this relay (<code>home-cal</code> and future apps), so a member's name appears the same everywhere instead of each app inventing its own. These fields are <strong>admin-set only</strong>: there is no self-service profile UI or PATCH/PUT endpoint anywhere. An admin sets or corrects them with <code>memberadd -email … -username … -name …</code> — re-running <code>memberadd</code> without those flags leaves any previously-set values unchanged rather than clearing them.</p>
