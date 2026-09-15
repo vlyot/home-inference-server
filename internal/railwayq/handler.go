@@ -148,6 +148,27 @@ func handleResult(db *sql.DB) http.HandlerFunc {
 	}
 }
 
+func handleMembersMe(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		stackID, ok := strings.CutPrefix(identityFrom(r.Context()), "user:")
+		if !ok {
+			// apikey identity has no membership row to look up.
+			writeErr(w, http.StatusNotFound, api.ErrCodeNotFound, "no profile for this credential type")
+			return
+		}
+		profile, err := GetMemberProfile(r.Context(), db, stackID)
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				writeErr(w, http.StatusNotFound, api.ErrCodeNotFound, "member not found")
+				return
+			}
+			writeErr(w, http.StatusInternalServerError, api.ErrCodeInternal, "profile lookup failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, profile)
+	}
+}
+
 func handleStatus(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		lastClaim, err := LastClaimAt(r.Context(), db)

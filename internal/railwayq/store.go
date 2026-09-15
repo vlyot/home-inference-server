@@ -273,6 +273,35 @@ func IsAllowedMember(ctx context.Context, db *sql.DB, stackUserID string) (bool,
 	return true, nil
 }
 
+// MemberProfile is a caller's own row in allowed_members. Username and
+// DisplayName are nil until set by an admin via memberadd — there is no
+// self-service edit path.
+type MemberProfile struct {
+	StackUserID string  `json:"stack_user_id"`
+	Email       string  `json:"email"`
+	Username    *string `json:"username"`
+	DisplayName *string `json:"display_name"`
+}
+
+// GetMemberProfile returns the caller's own membership row. Returns
+// ErrNotFound if stackUserID is not in allowed_members.
+func GetMemberProfile(ctx context.Context, db *sql.DB, stackUserID string) (MemberProfile, error) {
+	var p MemberProfile
+	err := db.QueryRowContext(ctx, `
+		SELECT stack_user_id, email, username, display_name
+		FROM allowed_members
+		WHERE stack_user_id = $1`,
+		stackUserID,
+	).Scan(&p.StackUserID, &p.Email, &p.Username, &p.DisplayName)
+	if err == sql.ErrNoRows {
+		return MemberProfile{}, ErrNotFound
+	}
+	if err != nil {
+		return MemberProfile{}, err
+	}
+	return p, nil
+}
+
 // sweepExpired returns stale processing jobs to pending after the visibility timeout.
 func sweepExpired(ctx context.Context, db *sql.DB) error {
 	_, err := db.ExecContext(ctx, `

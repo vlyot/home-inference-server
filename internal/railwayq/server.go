@@ -28,6 +28,7 @@ func New(db *sql.DB, cfg Config, limiter *Limiter, verifier *stackauth.Verifier)
 	mux.HandleFunc("/ack", handleAck(db))
 	mux.HandleFunc("/result/", handleResult(db))
 	mux.HandleFunc("/status", handleStatus(db))
+	mux.HandleFunc("/members/me", handleMembersMe(db))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})

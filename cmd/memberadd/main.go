@@ -28,10 +28,14 @@ CREATE TABLE IF NOT EXISTS allowed_members (
     stack_user_id  TEXT PRIMARY KEY,
     email          TEXT NOT NULL,
     added_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);`
+);
+ALTER TABLE allowed_members ADD COLUMN IF NOT EXISTS username TEXT;
+ALTER TABLE allowed_members ADD COLUMN IF NOT EXISTS display_name TEXT;`
 
 func main() {
 	email := flag.String("email", "", "member email (must have signed in via Neon Auth at least once)")
+	username := flag.String("username", "", "member username (admin-set; blank leaves any existing value unchanged)")
+	name := flag.String("name", "", "member display name (admin-set; blank leaves any existing value unchanged)")
 	remove := flag.Bool("remove", false, "remove the member instead of adding")
 	list := flag.Bool("list", false, "list current members")
 	flag.Parse()
@@ -60,7 +64,7 @@ func main() {
 
 	if *list {
 		rows, err := db.QueryContext(ctx,
-			`SELECT stack_user_id, email, added_at FROM allowed_members ORDER BY added_at`)
+			`SELECT stack_user_id, email, username, display_name, added_at FROM allowed_members ORDER BY added_at`)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "list: %v\n", err)
 			os.Exit(1)
@@ -68,9 +72,10 @@ func main() {
 		defer rows.Close()
 		for rows.Next() {
 			var id, em string
+			var uname, dname sql.NullString
 			var at time.Time
-			rows.Scan(&id, &em, &at) //nolint:errcheck
-			fmt.Printf("%s  %s  %s\n", id, em, at.Format(time.RFC3339))
+			rows.Scan(&id, &em, &uname, &dname, &at) //nolint:errcheck
+			fmt.Printf("%s  %s  %s  %s  %s\n", id, em, uname.String, dname.String, at.Format(time.RFC3339))
 		}
 		return
 	}
@@ -110,9 +115,13 @@ func main() {
 	}
 
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO allowed_members (stack_user_id, email) VALUES ($1, $2)
-		ON CONFLICT (stack_user_id) DO UPDATE SET email = EXCLUDED.email`,
-		stackID, *email,
+		INSERT INTO allowed_members (stack_user_id, email, username, display_name)
+		VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''))
+		ON CONFLICT (stack_user_id) DO UPDATE
+			SET email = EXCLUDED.email,
+			    username = COALESCE(EXCLUDED.username, allowed_members.username),
+			    display_name = COALESCE(EXCLUDED.display_name, allowed_members.display_name)`,
+		stackID, *email, *username, *name,
 	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "insert: %v\n", err)

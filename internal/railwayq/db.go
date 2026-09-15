@@ -40,6 +40,8 @@ CREATE TABLE IF NOT EXISTS allowed_members (
     email          TEXT NOT NULL,
     added_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE allowed_members ADD COLUMN IF NOT EXISTS username TEXT;
+ALTER TABLE allowed_members ADD COLUMN IF NOT EXISTS display_name TEXT;
 
 -- worker_heartbeat records the last time the PC worker polled /claim, even when
 -- the long-poll returned no job. GET /status derives pc_connected from this, so

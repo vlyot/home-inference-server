@@ -275,3 +275,75 @@ func TestStatusReportsPCConnected(t *testing.T) {
 		t.Fatalf("expected pc_connected=true after a recent claim")
 	}
 }
+
+func TestMembersMeRequiresAuth(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/members/me", nil))
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("no-auth members/me = %d, want 401", rr.Code)
+	}
+}
+
+func TestMembersMeReturnsOwnProfile(t *testing.T) {
+	srv, _, db := newTestServer(t)
+	aliceHdr := invite(t, db, "alice")
+	_, err := db.Exec(`UPDATE allowed_members SET username = $1, display_name = $2 WHERE stack_user_id = 'alice'`,
+		"alice123", "Alice A.")
+	if err != nil {
+		t.Fatalf("set profile: %v", err)
+	}
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/members/me", nil)
+	req.Header.Set("Authorization", aliceHdr)
+	srv.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("members/me = %d (%s), want 200", rr.Code, rr.Body)
+	}
+	var p railwayq.MemberProfile
+	json.Unmarshal(rr.Body.Bytes(), &p) //nolint:errcheck
+	if p.StackUserID != "alice" || p.Email != "alice@example.com" {
+		t.Errorf("unexpected identity fields: %+v", p)
+	}
+	if p.Username == nil || *p.Username != "alice123" {
+		t.Errorf("username = %v, want alice123", p.Username)
+	}
+	if p.DisplayName == nil || *p.DisplayName != "Alice A." {
+		t.Errorf("display_name = %v, want Alice A.", p.DisplayName)
+	}
+}
+
+func TestMembersMeWithoutProfileFieldsSetReturnsNull(t *testing.T) {
+	srv, _, db := newTestServer(t)
+	bobHdr := invite(t, db, "bob")
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/members/me", nil)
+	req.Header.Set("Authorization", bobHdr)
+	srv.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("members/me = %d (%s), want 200", rr.Code, rr.Body)
+	}
+	var p railwayq.MemberProfile
+	json.Unmarshal(rr.Body.Bytes(), &p) //nolint:errcheck
+	if p.Username != nil || p.DisplayName != nil {
+		t.Errorf("expected nil username/display_name, got %+v", p)
+	}
+}
+
+func TestMembersMeWithAPIKeyIs404(t *testing.T) {
+	srv, cfg, _ := newTestServer(t)
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/members/me", nil)
+	req.Header.Set("X-API-Key", cfg.StaticAPIKey)
+	srv.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("apikey members/me = %d, want 404", rr.Code)
+	}
+	var er api.ErrorResponse
+	json.Unmarshal(rr.Body.Bytes(), &er) //nolint:errcheck
+	if er.Code != api.ErrCodeNotFound {
+		t.Errorf("apikey members/me code = %q, want %q", er.Code, api.ErrCodeNotFound)
+	}
+}

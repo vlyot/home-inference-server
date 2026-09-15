@@ -1390,6 +1390,11 @@ const { accessToken } = await user.getAuthJson();</code></pre>
       <td class="field-desc"><code>200 { "pc_connected": bool, "last_claim_at"?: RFC3339, "pending_depth": int }</code>. <code>pc_connected</code> is true when the PC worker has polled <code>/claim</code> (heartbeat, whether or not it got a job) or claimed one within the last ~60&nbsp;s — so a connected-but-idle PC still reads as connected.</td>
     </tr>
     <tr>
+      <td class="field-name">GET /members/me</td>
+      <td class="field-desc">—. Returns the <em>caller's own</em> membership row only — there is no way to look up another member's profile.</td>
+      <td class="field-desc"><code>200 { "stack_user_id": string, "email": string, "username": string|null, "display_name": string|null }</code>. <code>username</code>/<code>display_name</code> are <code>null</code> until an admin sets them via <code>memberadd</code>. <code>404</code> for an <code>X-API-Key</code> caller (API keys have no member row).</td>
+    </tr>
+    <tr>
       <td class="field-name">GET /healthz</td>
       <td class="field-desc">—</td>
       <td class="field-desc"><code>200 OK</code>. No auth required.</td>
@@ -1418,10 +1423,15 @@ curl -H "Authorization: Bearer $TOKEN" https://&lt;relay&gt;/result/a1b2c3...
 
 <h3>Membership (invite-only)</h3>
 <p>Neon Auth's sign-up is open — anyone can create an account — but that alone gets a caller nothing. The relay rejects (<code>403 "not an invited member"</code>) any token whose Stack Auth user id is not in its <code>allowed_members</code> table. Neon Auth mirrors every account into the relay's database as <code>neon_auth.users_sync</code>; <code>memberadd</code> looks a person up there by email (so they must have signed in at least once) and adds them:</p>
-<pre><code>DATABASE_URL=… go run ./cmd/memberadd -email them@example.com            # add
-DATABASE_URL=… go run ./cmd/memberadd -email them@example.com -remove    # revoke
-DATABASE_URL=… go run ./cmd/memberadd -list                             # show the list</code></pre>
+<pre><code>DATABASE_URL=… go run ./cmd/memberadd -email them@example.com                                # add
+DATABASE_URL=… go run ./cmd/memberadd -email them@example.com -username johnb -name "John B."  # add + set profile
+DATABASE_URL=… go run ./cmd/memberadd -email them@example.com -remove                          # revoke
+DATABASE_URL=… go run ./cmd/memberadd -list                                                    # show the list</code></pre>
 <p>Onboarding order for a new person: they open the app and sign in once → you run <code>memberadd -email …</code> → their next request succeeds.</p>
+
+<h3>Shared profile (username / display name)</h3>
+<p><code>allowed_members</code> also holds <code>username</code> and <code>display_name</code> — a lightweight shared identity for every client app built on this relay (<code>home-cal</code> and future apps), so a member's name appears the same everywhere instead of each app inventing its own. These fields are <strong>admin-set only</strong>: there is no self-service profile UI or PATCH/PUT endpoint anywhere. An admin sets or corrects them with <code>memberadd -email … -username … -name …</code> — re-running <code>memberadd</code> without those flags leaves any previously-set values unchanged rather than clearing them.</p>
+<p>A client app resolves its own authenticated caller's name via <code>GET /members/me</code> (Bearer auth only — see the Endpoints table above). There is no endpoint to look up <em>another</em> member's profile; each app reads only the identity of whoever is currently signed in. This relies on every client app trusting the same Stack Auth session/cookie — that configuration lives in each app's own codebase, not the relay.</p>
 
 <h3>How the relay verifies a token</h3>
 <p>On the first Bearer request the relay fetches Stack Auth's public keys (JWKS) and caches them. Per request it then: checks the JWT is <code>ES256</code> (rejects <code>alg:none</code>), verifies the signature against the cached key for the token's <code>kid</code> (refetching once if the key id is new — key rotation), checks the issuer is this project and the token is unexpired, then looks the subject up in <code>allowed_members</code>. A forged token — even one with a real-looking <code>kid</code> and the correct issuer — fails the signature check and gets <code>401</code>.</p>
