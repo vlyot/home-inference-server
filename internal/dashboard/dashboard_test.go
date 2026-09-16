@@ -152,6 +152,33 @@ func TestPostAdminPageReturns404(t *testing.T) {
 	}
 }
 
+func TestGetFaviconICOReturns200SVG(t *testing.T) {
+	h := dashboard.New(assets.FS)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/favicon.ico", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /favicon.ico want 200, got %d", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "image/svg+xml") {
+		t.Fatalf("want image/svg+xml Content-Type, got %q", ct)
+	}
+	if !strings.Contains(w.Body.String(), "<svg") {
+		t.Errorf("GET /favicon.ico body doesn't look like SVG: %.100s", w.Body.String())
+	}
+}
+
+func TestGetFaviconSVGReturns200(t *testing.T) {
+	h := dashboard.New(assets.FS)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/favicon.svg", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /favicon.svg want 200, got %d", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "image/svg+xml") {
+		t.Fatalf("want image/svg+xml Content-Type, got %q", ct)
+	}
+}
+
 func TestAdminHTMLHasControlIDs(t *testing.T) {
 	b, err := assets.FS.ReadFile("web/admin.html")
 	if err != nil {

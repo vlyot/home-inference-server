@@ -13,7 +13,9 @@ import (
 // logs.html on GET /logs, and admin.html on GET /admin (the loopback-only
 // drain/resume/restart control page — its buttons only work when opened on the
 // server itself). GET /vendor/* serves embedded third-party assets directly by
-// path. All other paths return 404.
+// path. GET /favicon.ico and GET /favicon.svg both serve the embedded SVG
+// icon — browsers accept an SVG favicon regardless of which path they probe.
+// All other paths return 404.
 func New(files embed.FS) http.Handler {
 	sub, err := fs.Sub(files, "web")
 	if err != nil {
@@ -46,6 +48,11 @@ func New(files embed.FS) http.Handler {
 		case r.URL.Path == "/admin":
 			r2 := r.Clone(r.Context())
 			r2.URL.Path = "/admin.html"
+			fileServer.ServeHTTP(w, r2)
+		case r.URL.Path == "/favicon.ico" || r.URL.Path == "/favicon.svg":
+			r2 := r.Clone(r.Context())
+			r2.URL.Path = "/favicon.svg"
+			w.Header().Set("Content-Type", "image/svg+xml")
 			fileServer.ServeHTTP(w, r2)
 		case strings.HasPrefix(r.URL.Path, "/vendor/"):
 			fileServer.ServeHTTP(w, r)
