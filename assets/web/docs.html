@@ -230,10 +230,18 @@ curl -X POST http://localhost:8080/v1/infer \
       \"prompt\": \"What is the total amount on this receipt?\"
     }
   }"</code></pre>
-<p>A vision request may also carry <code>response_format</code> (see
-<a href="#structured-output">Structured Output</a>) &mdash; the schema is
-applied to the same inference, so you can ask for a JSON object describing the
-image directly.</p>
+<p><code>response_format</code> (see <a href="#structured-output">Structured
+Output</a>) has <strong>no effect on a vision request</strong> — confirmed
+by live testing, not just reading the code. It only applies to
+<code>text_input.messages</code> (the chat path); <code>vision_input</code>
+has no <code>messages</code> field for a schema to attach to, so a
+<code>response_format</code> sent alongside <code>vision_input</code> is
+silently ignored (no error — the request just runs unconstrained and returns
+free-form prose). If you need structured JSON describing an image today,
+run the vision model first (with a prompt asking for the fields you want in
+prose) and parse/re-structure the result yourself, or push the vision
+output through a second <code>text_input.messages</code> call with
+<code>response_format</code> set on that second hop.</p>
 
 <h3 id="structured-output">Structured Output (JSON mode)</h3>
 <p>Add <code>response_format</code> to any request that uses
@@ -460,7 +468,7 @@ implement.</p>
       <td class="field-name">response_format</td>
       <td class="field-type">object</td>
       <td class="field-default">null (unconstrained)</td>
-      <td class="field-desc">Constrains output to a JSON shape. Forwarded verbatim to llama-server, which compiles it to a sampling grammar so the model cannot emit a non-conforming token. Accepts <code>{"type":"json_object"}</code> or <code>{"type":"json_schema","json_schema":{...}}</code> (OpenAI shape). <strong>Requires <code>text_input.messages</code></strong> — ignored on a prompt-only request. Works on a <code>vision</code> request the same way — the schema constrains the model's answer about the image. A schema llama-server cannot compile returns <code>400 {"code":"invalid_grammar"}</code>. See <a href="#structured-output">Structured Output</a>.</td>
+      <td class="field-desc">Constrains output to a JSON shape. Forwarded verbatim to llama-server, which compiles it to a sampling grammar so the model cannot emit a non-conforming token. Accepts <code>{"type":"json_object"}</code> or <code>{"type":"json_schema","json_schema":{...}}</code> (OpenAI shape). <strong>Requires <code>text_input.messages</code></strong> — ignored on a prompt-only request, and <strong>has no effect on a <code>vision</code> request</strong> (silently ignored, confirmed by live testing — <code>vision_input</code> has no <code>messages</code> field for a schema to attach to; see <a href="#vision-mode">How vision works</a>). A schema llama-server cannot compile returns <code>400 {"code":"invalid_grammar"}</code>. See <a href="#structured-output">Structured Output</a>.</td>
     </tr>
     <tr>
       <td class="field-name">tools</td>
