@@ -54,12 +54,20 @@ type InferRequest struct {
 	ResponseFormat json.RawMessage `json:"response_format,omitempty"`
 	// Tools, when set, offers the model function-calling tools it may invoke
 	// instead of answering directly. Requires text_input.messages (the chat
-	// path) and is rejected alongside vision_input (ErrCodeInvalidRequest) —
-	// the vision tier's chat template has no tool-calling grammar. Currently
-	// the only tool the server resolves is "web_search"; a request naming any
-	// other tool still round-trips normally but the model's call for it is
-	// answered with a synthetic "tool not available" result rather than
-	// failing the request. Not supported with stream:true (ErrCodeNotImplemented).
+	// path) — a bare prompt with no message list returns ErrCodeInvalidRequest.
+	// Rejected alongside vision_input with ErrCodeToolNotSupported — the vision
+	// tier's chat template has no tool-calling grammar. Currently the only tool
+	// the server resolves is "web_search" (a real call to Tavily's search API,
+	// via internal/websearch); a request naming any other tool still
+	// round-trips normally but the model's call for it is answered with a
+	// synthetic "tool not available" result rather than failing the request.
+	// The server orchestrates the whole tool round-trip itself — at most one
+	// resolve-then-final-answer hop (see maxToolHops in
+	// internal/server/server_tools.go) — so the caller always gets back one
+	// finished, grounded answer in InferResponse.Output; it never has to
+	// execute a tool call itself and re-POST with the result appended to
+	// messages. ToolCalls in the response is observability only. Fully
+	// supported with stream:true — see handleInferStreamWithTools.
 	Tools []Tool `json:"tools,omitempty"`
 }
 
