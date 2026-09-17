@@ -314,6 +314,7 @@ implement.</p>
     "text_input": { "messages": [
       { "role": "user", "content": "What is a recent headline about the Go programming language?" }
     ]},
+    "min_tier": "mid",
     "tools": [{
       "type": "function",
       "function": {
@@ -344,6 +345,13 @@ implement.</p>
   <li>Not supported with <code>vision_input</code> &mdash; the vision tier's
     chat template has no tool-calling grammar. Returns <code>400</code>
     <code>{"code": "tool_not_supported"}</code>.</li>
+  <li><strong>Requires <code>min_tier</code> or <code>preferred_tier</code> of
+    <code>"mid"</code> or <code>"strong"</code>.</strong> The weak tier's
+    chat template has no tool-calling grammar either, and <code>min_tier</code>
+    defaults to <code>"weak"</code> &mdash; so an unconstrained <code>tools</code>
+    request (no tier floor/pin set) is rejected the same way as the vision
+    case, <code>400</code> <code>{"code": "tool_not_supported"}</code>, rather
+    than being allowed to land on the weak tier and fail server-side.</li>
   <li><strong>Works with <code>stream: true</code>.</strong> The model's
     reasoning (if any) streams live as usual while it decides whether to
     search; if it calls <code>web_search</code>, one <code>StreamChunk</code>
@@ -474,7 +482,7 @@ implement.</p>
       <td class="field-name">tools</td>
       <td class="field-type">array</td>
       <td class="field-default">[] (no tools offered)</td>
-      <td class="field-desc">Offers the model function-calling tools it may invoke instead of answering directly. OpenAI shape: <code>[{"type":"function","function":{"name","description","parameters"}}]</code>. Currently only <code>"web_search"</code> is a real, resolved tool — resolved entirely server-side inside this one request, whether streaming or not. <strong>Requires <code>text_input.messages</code></strong> — a prompt-only request with <code>tools</code> set returns <code>400 invalid_request</code>. Rejected with <code>vision_input</code> (<code>400 {"code":"tool_not_supported"}</code> — the vision tier's chat template has no tool-calling grammar). Compatible with <code>stream: true</code> — see <a href="#tools">Web Search Tool Calling</a> and the <a href="#streaming">Streaming Guide</a>'s "Web search tool calls" section.</td>
+      <td class="field-desc">Offers the model function-calling tools it may invoke instead of answering directly. OpenAI shape: <code>[{"type":"function","function":{"name","description","parameters"}}]</code>. Currently only <code>"web_search"</code> is a real, resolved tool — resolved entirely server-side inside this one request, whether streaming or not. <strong>Requires <code>text_input.messages</code></strong> — a prompt-only request with <code>tools</code> set returns <code>400 invalid_request</code>. Rejected with <code>vision_input</code> (<code>400 {"code":"tool_not_supported"}</code> — the vision tier's chat template has no tool-calling grammar). <strong>Also requires <code>min_tier</code> or <code>preferred_tier</code> of <code>"mid"</code> or <code>"strong"</code></strong> — the weak tier's chat template has no tool-calling grammar either, and <code>min_tier</code> defaults to <code>"weak"</code>, so an unconstrained <code>tools</code> request is rejected up front (<code>400 {"code":"tool_not_supported"}</code>) rather than being allowed to land on the weak tier and fail. Compatible with <code>stream: true</code> — see <a href="#tools">Web Search Tool Calling</a> and the <a href="#streaming">Streaming Guide</a>'s "Web search tool calls" section.</td>
     </tr>
   </tbody>
 </table>

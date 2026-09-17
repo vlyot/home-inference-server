@@ -344,6 +344,20 @@ func (s *Server) handleInfer(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, api.ErrCodeToolNotSupported, "tools are not supported with vision_input", req.CorrelationID)
 			return
 		}
+		// The weak tier's chat template also has no tool-calling grammar (see
+		// roadmap.md, Phase 14 — confirmed by parsing tokenizer.chat_template
+		// out of the GGUF directly). MinTier defaults to "weak", so a plain
+		// modality:"text" request with tools and no explicit min_tier/
+		// preferred_tier would otherwise be eligible to land on weak under
+		// VRAM pressure (or simply because weak is the currently-loaded
+		// model) and fail server-side against llama-server with a 500 —
+		// reject up front instead, same as the vision case.
+		if req.MinTier != api.MinTierMid && req.MinTier != api.MinTierStrong &&
+			req.PreferredTier != api.MinTierMid && req.PreferredTier != api.MinTierStrong {
+			writeError(w, http.StatusBadRequest, api.ErrCodeToolNotSupported,
+				`tools requires min_tier or preferred_tier of "mid" or "strong" — the weak tier has no tool-calling grammar`, req.CorrelationID)
+			return
+		}
 		// Tools ride the chat-completions path, which requires a message list —
 		// a bare text_input.prompt has no chat template to attach tool
 		// declarations to.

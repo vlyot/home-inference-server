@@ -91,6 +91,7 @@ func TestServer_InferWithToolsEndToEnd(t *testing.T) {
 	body, _ := json.Marshal(api.InferRequest{
 		Modality:  api.ModalityText,
 		TextInput: &api.TextInput{Messages: []api.ChatMessage{{Role: "user", Content: "what's the latest news"}}},
+		MinTier:   api.MinTierMid,
 		Tools: []api.Tool{{
 			Type:     "function",
 			Function: api.ToolFunction{Name: "web_search", Description: "search the web"},
@@ -163,6 +164,7 @@ func TestHandleInfer_ToolsWithoutMessagesRejected(t *testing.T) {
 	body, _ := json.Marshal(api.InferRequest{
 		Modality:  api.ModalityText,
 		TextInput: &api.TextInput{Prompt: "hello"},
+		MinTier:   api.MinTierMid,
 		Tools: []api.Tool{{
 			Type:     "function",
 			Function: api.ToolFunction{Name: "web_search"},
@@ -179,6 +181,70 @@ func TestHandleInfer_ToolsWithoutMessagesRejected(t *testing.T) {
 	}
 }
 
+// TestHandleInfer_ToolsWithoutTierFloorRejected guards the actual bug behind
+// a real deployment's 500: MinTier defaults to "weak", and the weak tier's
+// chat template has no tool-calling grammar (see roadmap.md, Phase 14). A
+// text+tools request with no min_tier/preferred_tier must be rejected up
+// front — same as the vision case — rather than being allowed to land on
+// weak (e.g. because it's the currently-loaded model) and fail against
+// llama-server with a raw 500/model_load_failed.
+func TestHandleInfer_ToolsWithoutTierFloorRejected(t *testing.T) {
+	h := newHarness(t, 0)
+
+	body, _ := json.Marshal(api.InferRequest{
+		Modality:  api.ModalityText,
+		TextInput: &api.TextInput{Messages: []api.ChatMessage{{Role: "user", Content: "hi"}}},
+		Tools: []api.Tool{{
+			Type:     "function",
+			Function: api.ToolFunction{Name: "web_search"},
+		}},
+	})
+
+	resp, err := http.Post(h.ts.URL+api.PathInfer, "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /v1/infer: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+
+	var out api.ErrorResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if out.Code != api.ErrCodeToolNotSupported {
+		t.Errorf("Code = %q, want %q", out.Code, api.ErrCodeToolNotSupported)
+	}
+}
+
+// TestHandleInfer_ToolsWithPreferredTierMidAccepted confirms preferred_tier
+// alone (without min_tier) also satisfies the tier-floor requirement, since
+// it's an exact pin — a request pinned to "mid" can never land on weak.
+func TestHandleInfer_ToolsWithPreferredTierMidAccepted(t *testing.T) {
+	b := &scriptedToolBackend{responses: []backend.Response{{Output: "a plain answer"}}}
+	h := streamHarnessWithBackend(t, b)
+
+	body, _ := json.Marshal(api.InferRequest{
+		Modality:      api.ModalityText,
+		TextInput:     &api.TextInput{Messages: []api.ChatMessage{{Role: "user", Content: "hi"}}},
+		PreferredTier: api.MinTierMid,
+		Tools: []api.Tool{{
+			Type:     "function",
+			Function: api.ToolFunction{Name: "web_search"},
+		}},
+	})
+
+	resp, err := http.Post(h.ts.URL+api.PathInfer, "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /v1/infer: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
 // TestHandleInfer_ToolsWithStreamNoLongerRejected replaces the old
 // TestHandleInfer_ToolsWithStreamRejected (which asserted 501) now that
 // streaming + tools is a real, supported combination.
@@ -190,6 +256,7 @@ func TestHandleInfer_ToolsWithStreamNoLongerRejected(t *testing.T) {
 		Modality:  api.ModalityText,
 		TextInput: &api.TextInput{Messages: []api.ChatMessage{{Role: "user", Content: "hi"}}},
 		Stream:    true,
+		MinTier:   api.MinTierMid,
 		Tools: []api.Tool{{
 			Type:     "function",
 			Function: api.ToolFunction{Name: "web_search"},
@@ -226,6 +293,7 @@ func TestServer_InferStreamWithToolsEndToEnd(t *testing.T) {
 		Modality:  api.ModalityText,
 		TextInput: &api.TextInput{Messages: []api.ChatMessage{{Role: "user", Content: "what's the latest news"}}},
 		Stream:    true,
+		MinTier:   api.MinTierMid,
 		Tools: []api.Tool{{
 			Type:     "function",
 			Function: api.ToolFunction{Name: "web_search", Description: "search the web"},
