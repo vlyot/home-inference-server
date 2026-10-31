@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"net/http"
+	"time"
 
 	"github.com/ngkaichong/home-inference-server/assets"
 	"github.com/ngkaichong/home-inference-server/internal/apps"
@@ -24,6 +25,8 @@ import (
 // than are meaningful here; mounting it at /docs is enough — it internally
 // maps that exact path to the embedded docs.html file.
 //
+// /apps/status tells public sites whether the PC is online, nothing more.
+//
 // /apps/ask is the public route for browser-only apps: a publishable key
 // selects the app's server-side spec and the relay builds the prompt (see
 // docs/public-apps.md). knowledge loads apps' knowledge files; nil leaves any
@@ -43,6 +46,7 @@ func New(db *sql.DB, cfg Config, limiter *Limiter, verifier *stackauth.Verifier,
 		}
 		return knowledge.Index(ctx, url)
 	}))
+	mux.HandleFunc("/apps/status", handlePublicStatus(dbAskStore{db}.PCConnected, time.Now))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})

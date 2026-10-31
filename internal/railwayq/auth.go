@@ -90,11 +90,13 @@ func resolveIdentity(ctx context.Context, r *http.Request, cfg Config, db *sql.D
 // docs are reference material meant to be readable by any client or AI
 // agent hitting this relay's public URL, not a member-gated capability — and
 // /apps/ask, which authenticates its own publishable key and carries per-app
-// limits (see ask.go).
+// limits (see ask.go), and /apps/status, which says only whether the PC is
+// online (see status_public.go).
 var publicPaths = map[string]bool{
-	"/healthz":  true,
-	"/docs":     true,
-	"/apps/ask": true,
+	"/healthz":     true,
+	"/docs":        true,
+	"/apps/ask":    true,
+	"/apps/status": true,
 }
 
 // identityMiddleware authenticates every request (except publicPaths), keeps

@@ -45,6 +45,13 @@ one per-minute bucket and one `usage` row per day. Keys are stored as `sha256(ke
 and shown once when issued. Revoke a single key by its prefix, or disable the app to
 switch off every key at once.
 
+## Public status
+
+`GET /apps/status` needs no key and allows any origin. It returns only
+`{ online, checked_at }`, so a site can say whether its chat has a model behind it
+before a visitor asks. Queue depth and poll times stay on the member-only `/status`.
+One database lookup answers every request for 15 s.
+
 ## Threats
 
 | Threat | What could happen | Defence |
@@ -58,6 +65,7 @@ switch off every key at once.
 | Flooding | Scripts burn GPU time or fill the queue. | Body ≤ 8 KB (413). Input limits (400). Per visitor: per-minute bucket and daily count. Per app: per-minute, daily, and concurrency caps (429 / 503). |
 | Abandoned jobs | A caller gives up, or the PC is off, and the job runs hours later. | `/apps/ask` cancels its own unclaimed job on timeout or disconnect. Any other caller can do the same with `DELETE /job/{id}`, which only works on the caller's own pending job. |
 | Oversized or poisoned knowledge | A bad deploy of the site serves junk. | Capped at 512 KB, must parse with `version: 1` and unique document ids. On any failure the last good copy is kept. The file comes from the app owner's own site, so its content is trusted. |
+| Status flooding or snooping | Scripts hammer `/apps/status`, or read it to learn when the PC is on. | One lookup per 15 s however many requests arrive. The body is a single boolean and the check time, nothing about load or usage. When the PC is on is already visible to anyone who asks the chat. |
 | Visitor tracking | The relay stores who asked what. | The visitor key is `sha256(APP_IP_SALT + ip)`, kept in memory only. The job row is purged by the result TTL. Only a question's length is logged, never its text. |
 | Spoofed client address | A caller rotates `X-Forwarded-For` to dodge per-visitor limits. | The key uses `X-Real-IP`, which Railway's edge sets itself. The per-app caps bound the damage if it were ever bypassed. |
 

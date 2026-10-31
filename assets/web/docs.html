@@ -1328,7 +1328,7 @@ narrows this to tiers with a vision variant — currently only weak):</p>
 <p>The relay's base URL is your Railway service URL, not <code>localhost</code>. The local <code>/v1/*</code> API on this page is unchanged and still only reachable on the LAN.</p>
 
 <h3>Authentication</h3>
-<p>Every relay request (except <a href="#public-apps"><code>POST /apps/ask</code></a>, <code>/healthz</code> and <code>/docs</code>) carries <strong>one</strong> of:</p>
+<p>Every relay request (except <a href="#public-apps"><code>POST /apps/ask</code></a>, <code>GET /apps/status</code>, <code>/healthz</code> and <code>/docs</code>) carries <strong>one</strong> of:</p>
 <ul>
   <li><code>Authorization: Bearer &lt;token&gt;</code> — a <strong>Neon Auth</strong> access token. The app signs the user in with the Neon Auth (Stack Auth) client SDK — magic link or OAuth, hosted by Neon, no email server of your own — and forwards the token it gets back. The relay verifies it against Stack Auth's published JWKS (ES256). Identity <code>user:&lt;stack_user_id&gt;</code>.</li>
   <li><code>X-API-Key: sk_…</code> — an app's <strong>secret key</strong>, for an app with its own backend. Issued per app with <code>appadd</code>, so each app has its own identity (<code>app:&lt;id&gt;</code>), its own per-minute and daily limits from its spec, and its own revoke switch. Never ship it to a browser — that is what a publishable key is for.</li>
@@ -1430,6 +1430,11 @@ const { accessToken } = await user.getAuthJson();</code></pre>
       <td class="field-name">POST /apps/ask</td>
       <td class="field-desc">No relay credential — see <a href="#public-apps">Public apps</a>.</td>
       <td class="field-desc"><code>200 { "answer", "citations", "refused" }</code></td>
+    </tr>
+    <tr>
+      <td class="field-name">GET /apps/status</td>
+      <td class="field-desc">No credential. Any origin (<code>Access-Control-Allow-Origin: *</code>).</td>
+      <td class="field-desc"><code>200 { "online": bool, "checked_at": RFC3339 }</code>. <code>online</code> means the same as <code>pc_connected</code> on <code>/status</code>. One lookup answers every request for 15&nbsp;s. <code>405</code> for anything but <code>GET</code>/<code>HEAD</code>.</td>
     </tr>
     <tr>
       <td class="field-name">GET /members/me</td>
