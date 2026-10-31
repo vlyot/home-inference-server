@@ -69,6 +69,15 @@ type InferRequest struct {
 	// messages. ToolCalls in the response is observability only. Fully
 	// supported with stream:true — see handleInferStreamWithTools.
 	Tools []Tool `json:"tools,omitempty"`
+	// Reasoning switches a reasoning-capable model's "thinking" phase on or
+	// off on the chat path. Values: "off" | "on". Empty leaves the model's own
+	// default (Gemma 4: on). "off" stops thinking from eating a small
+	// max_tokens budget before any answer is written. It is forwarded as
+	// llama-server's chat_template_kwargs.enable_thinking, so it only works
+	// when the model's chat template reads that flag. A bare text_input.prompt
+	// on a mid/strong tier takes the plain completion path, which never
+	// thinks, so the field has no effect there.
+	Reasoning string `json:"reasoning,omitempty"`
 }
 
 // Tool describes one function the model may call, per the OpenAI

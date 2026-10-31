@@ -73,7 +73,7 @@ and a daily cap so a leaked token can't run up the bill.
 | Deployable                 | Entry point   | Runs on                   | Serves                                                                                |
 | -------------------------- | ------------- | ------------------------- | ------------------------------------------------------------------------------------- |
 | **Local inference server** | `cmd/server`  | the GPU box (Windows)     | `/v1/*`, dashboard, chat UI, `/docs`, `/logs`, loopback admin                         |
-| **Hosted relay**           | `cmd/railway` | Railway (24/7, paid plan) | `/enqueue`, `/result/{id}`, `/status` for remote clients; the PC worker long-polls it |
+| **Hosted relay**           | `cmd/railway` | Railway (24/7, paid plan) | `/enqueue`, `/result/{id}`, `/status` for remote clients, `/apps/ask` for public browser apps; the PC worker long-polls it |
 
 Remote access is layered on top without touching the local inference server or
 the `/v1/infer` contract.
@@ -171,13 +171,15 @@ curl -N localhost:8080/v1/infer -H 'content-type: application/json' -d '{
 ```
 
 **Request fields beyond the basics:** `priority`, `min_tier`, `stream`,
-`timeout_ms`, `system_prompt`.
+`timeout_ms`, `system_prompt`, `reasoning` (`"off"` stops Gemma's thinking
+from eating a small `max_tokens` budget on the chat path).
 **Response fields:** `tokens_per_sec`, `queue_wait_ms`, `inference_ms`,
 `deferred`, plus the `X-Quality-Degraded` header.
 **Error codes** (`error_code` in the body): `invalid_request`,
 `invalid_modality`, `unauthorized`, `overloaded`, `model_load_failed`,
 `internal_error`, `unavailable`, `timeout`, `rate_limited`, `quota_exceeded`,
-`queue_full`, `not_found`, `draining`, `not_implemented`, `reasoning_exhausted`.
+`queue_full`, `not_found`, `draining`, `not_implemented`, `reasoning_exhausted`,
+`not_pending` (relay cancel only).
 
 ### Relay contract (friends-and-family apps)
 
@@ -185,11 +187,28 @@ curl -N localhost:8080/v1/infer -H 'content-type: application/json' -d '{
 POST /enqueue   { correlation_id, payload }   -> 201 { id }
 GET  /result/{id}                             -> 200 { status, result_payload?, error_code? }
 GET  /status                                  -> 200 { pc_connected, last_claim_at, pending_depth }
+DELETE /job/{id}                              -> 204 | 404 | 409 not_pending
 ```
 
 `status` is `pending | processing | done | failed`. Auth:
-`Authorization: Bearer <neon-auth-access-token>` (web) or `X-API-Key` (native /
-CLI / PC worker). A valid token for a non-invited user → `403`.
+`Authorization: Bearer <neon-auth-access-token>` (invited web users),
+`X-API-Key: sk_…` (an app's own backend — its own identity `app:<id>`, limits
+and revoke switch), or `X-API-Key: <QUEUE_API_KEY>` (the owner's CLI and the PC
+worker). A valid token for a non-invited user → `403`. `/claim` and `/ack`
+accept only the owner key.
+
+### Public apps (browser-only clients)
+
+```
+POST /apps/ask   { key: "pk_…", input, history? }   -> 200 { answer, citations: [{ n, title, link }], refused }
+```
+
+A static site can't hold a secret, so it ships a **publishable key** instead.
+The key selects the app's spec stored on the relay — allowed origins, pinned
+system prompt, optional `knowledge_url`, citation rules, limits — and the relay
+builds the whole prompt itself, so the key can't be used as a general LLM.
+Register an app with `cmd/appadd -spec app.json -new-key pk`. Threat model:
+[docs/public-apps.md](docs/public-apps.md).
 
 ---
 
@@ -235,7 +254,7 @@ Flags: `--backend=llamacpp|stub`, `--chats-dir <path>`.
 Relay (`cmd/railway`) reads `DATABASE_URL` (Postgres), `QUEUE_API_KEY`, and — for
 the Neon Auth Bearer path — `STACK_JWKS_URL` + `STACK_PROJECT_ID`, plus optional
 `RESULT_TTL_SECONDS` / `MAX_PENDING_DEPTH` / `RATE_PER_MIN` / `DAILY_QUOTA` /
-`MAX_BODY_BYTES` (code defaults in `internal/railwayq/config.go`).
+`MAX_BODY_BYTES` and `APP_IP_SALT` (code defaults in `internal/railwayq/config.go`).
 
 ---
 
@@ -286,6 +305,7 @@ The server has loopback-only admin endpoints — `curl` from the box, or the
 | `cmd/bench/`                                                                       | throughput / latency benchmark harness                   |
 | `cmd/testapp/`, `internal/testapp/`                                                | CLI examples + pointable conformance suite               |
 | `cmd/memberadd/`                                                                   | relay invite-list CLI                                    |
+| `cmd/appadd/`                                                                      | relay public-app and app-key CLI                         |
 | `cmd/nvml-check/`                                                                  | live VRAM probe                                          |
 | `internal/queue/`, `internal/batcher/`, `internal/dispatcher/`, `internal/router/` | the core pipeline                                        |
 | `internal/backend/vram/`                                                           | tier selection (incl. vision-mode), layer split, eviction, reaper |
@@ -294,6 +314,7 @@ The server has loopback-only admin endpoints — `curl` from the box, or the
 | `internal/relayenqueue/`                                                           | local side of durable deferral to the relay               |
 | `internal/remote/`                                                                 | PC-side long-poll worker                                 |
 | `internal/railwayq/`                                                               | relay queue store + HTTP handlers                        |
+| `internal/apps/`                                                                   | public-app specs, knowledge retrieval, prompt frame, answer cleaning |
 | `internal/stackauth/`                                                              | Neon Auth (Stack Auth) JWKS / ES256 verification         |
 | `internal/chatstore/`                                                              | server-side conversation persistence                     |
 | `internal/server/`                                                                 | HTTP handlers, streaming, admin                          |

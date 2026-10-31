@@ -26,6 +26,7 @@ func openTestDB(t *testing.T) *sql.DB {
 		db.Exec("DELETE FROM jobs")            //nolint:errcheck
 		db.Exec("DELETE FROM usage")           //nolint:errcheck
 		db.Exec("DELETE FROM allowed_members") //nolint:errcheck
+		db.Exec("DELETE FROM apps")            //nolint:errcheck
 	}
 	t.Cleanup(func() {
 		reset()

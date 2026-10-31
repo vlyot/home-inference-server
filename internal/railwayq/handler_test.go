@@ -48,7 +48,7 @@ func newTestServer(t *testing.T) (http.Handler, railwayq.Config, *sql.DB) {
 func newTestServerCfg(t *testing.T, cfg railwayq.Config) (http.Handler, railwayq.Config, *sql.DB) {
 	t.Helper()
 	db := openTestDB(t)
-	return railwayq.New(db, cfg, railwayq.NewLimiter(cfg.RatePerMin), issuer.Verifier), cfg, db
+	return railwayq.New(db, cfg, railwayq.NewLimiter(cfg.RatePerMin), issuer.Verifier, nil), cfg, db
 }
 
 // invite registers a Stack Auth subject in allowed_members on db and returns a

@@ -309,6 +309,21 @@ type chatReq struct {
 	// this into the system-turn tool declarations and a grammar constraining
 	// output to valid tool-call syntax. Omitted (nil) leaves tool-calling off.
 	Tools []wireTool `json:"tools,omitempty"`
+	// ChatTemplateKwargs is passed to the model's jinja chat template; it
+	// carries enable_thinking when the caller set Reasoning.
+	ChatTemplateKwargs map[string]any `json:"chat_template_kwargs,omitempty"`
+}
+
+// templateKwargs maps backend.Request.Reasoning onto the enable_thinking
+// template variable Gemma 4's (and Qwen 3's) chat templates read.
+func templateKwargs(reasoning string) map[string]any {
+	switch reasoning {
+	case "off":
+		return map[string]any{"enable_thinking": false}
+	case "on":
+		return map[string]any{"enable_thinking": true}
+	}
+	return nil
 }
 
 // wireTool mirrors backend.Tool for the wire format.
@@ -415,13 +430,14 @@ func toChatMessages(req backend.Request) []chatMessage {
 // chatComplete sends a non-streaming /v1/chat/completions request.
 func chatComplete(ctx context.Context, baseURL string, req backend.Request) (backend.Response, error) {
 	body := chatReq{
-		Model:          "local",
-		Messages:       toChatMessages(req),
-		MaxTokens:      req.MaxTokens,
-		Temperature:    req.Temperature,
-		Stream:         false,
-		ResponseFormat: req.ResponseFormat,
-		Tools:          toWireTools(req.Tools),
+		Model:              "local",
+		Messages:           toChatMessages(req),
+		MaxTokens:          req.MaxTokens,
+		Temperature:        req.Temperature,
+		Stream:             false,
+		ResponseFormat:     req.ResponseFormat,
+		Tools:              toWireTools(req.Tools),
+		ChatTemplateKwargs: templateKwargs(req.Reasoning),
 	}
 	if body.MaxTokens == 0 {
 		body.MaxTokens = defaultChatMaxTokens
@@ -565,13 +581,14 @@ func chatCompleteStream(ctx context.Context, baseURL string, req backend.Request
 		StreamOptions map[string]bool `json:"stream_options"`
 	}{
 		chatReq: chatReq{
-			Model:          "local",
-			Messages:       toChatMessages(req),
-			MaxTokens:      req.MaxTokens,
-			Temperature:    req.Temperature,
-			Stream:         true,
-			ResponseFormat: req.ResponseFormat,
-			Tools:          toWireTools(req.Tools),
+			Model:              "local",
+			Messages:           toChatMessages(req),
+			MaxTokens:          req.MaxTokens,
+			Temperature:        req.Temperature,
+			Stream:             true,
+			ResponseFormat:     req.ResponseFormat,
+			Tools:              toWireTools(req.Tools),
+			ChatTemplateKwargs: templateKwargs(req.Reasoning),
 		},
 		StreamOptions: map[string]bool{"include_usage": true},
 	}

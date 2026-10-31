@@ -148,6 +148,24 @@ func handleResult(db *sql.DB) http.HandlerFunc {
 	}
 }
 
+// handleCancel serves DELETE /job/{id}: it removes the caller's job while it
+// is still pending, so a job its client gave up on never costs GPU time.
+func handleCancel(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		err := CancelPending(r.Context(), db, r.PathValue("id"), identityFrom(r.Context()))
+		switch {
+		case err == nil:
+			w.WriteHeader(http.StatusNoContent)
+		case errors.Is(err, ErrNotFound):
+			writeErr(w, http.StatusNotFound, api.ErrCodeNotFound, "no such job")
+		case errors.Is(err, ErrNotPending):
+			writeErr(w, http.StatusConflict, api.ErrCodeNotPending, "job already claimed or finished")
+		default:
+			writeErr(w, http.StatusInternalServerError, api.ErrCodeInternal, "cancel failed")
+		}
+	}
+}
+
 func handleMembersMe(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		stackID, ok := strings.CutPrefix(identityFrom(r.Context()), "user:")
@@ -186,18 +204,33 @@ func handleStatus(db *sql.DB) http.HandlerFunc {
 			writeErr(w, http.StatusInternalServerError, api.ErrCodeInternal, "status lookup failed")
 			return
 		}
-		// pc_connected: the PC has polled /claim (heartbeat) or claimed a job
-		// within ~2× the long-poll interval — whichever is more recent.
-		recent := lastPoll
-		if lastClaim != nil && (recent == nil || lastClaim.After(*recent)) {
-			recent = lastClaim
-		}
-		connected := recent != nil &&
-			time.Since(*recent) < 2*time.Duration(queue.LongPollTimeoutSeconds)*time.Second
 		writeJSON(w, http.StatusOK, queue.QueueStatusResponse{
-			PCConnected:  connected,
+			PCConnected:  isConnected(lastPoll, lastClaim),
 			LastClaimAt:  lastClaim,
 			PendingDepth: pending,
 		})
 	}
+}
+
+// isConnected reports whether the PC has polled /claim (heartbeat) or claimed a
+// job within ~2× the long-poll interval — whichever is more recent.
+func isConnected(lastPoll, lastClaim *time.Time) bool {
+	recent := lastPoll
+	if lastClaim != nil && (recent == nil || lastClaim.After(*recent)) {
+		recent = lastClaim
+	}
+	return recent != nil &&
+		time.Since(*recent) < 2*time.Duration(queue.LongPollTimeoutSeconds)*time.Second
+}
+
+func pcConnected(ctx context.Context, db *sql.DB) (bool, error) {
+	lastPoll, err := LastHeartbeat(ctx, db)
+	if err != nil {
+		return false, err
+	}
+	lastClaim, err := LastClaimAt(ctx, db)
+	if err != nil {
+		return false, err
+	}
+	return isConnected(lastPoll, lastClaim), nil
 }

@@ -16,6 +16,34 @@ import (
 // indistinguishable.
 var ErrNotFound = errors.New("railwayq: job not found")
 
+// ErrNotPending is returned by CancelPending when the caller's job exists but
+// has already been claimed or finished.
+var ErrNotPending = errors.New("railwayq: job is not pending")
+
+// CancelPending deletes the caller's job only while it is still pending, so a
+// job the caller has given up on is never claimed later. A job already
+// claimed is left to finish (ErrNotPending); an unknown id or another
+// caller's job is ErrNotFound.
+func CancelPending(ctx context.Context, db *sql.DB, id, identity string) error {
+	res, err := db.ExecContext(ctx,
+		`DELETE FROM jobs WHERE id = $1 AND identity = $2 AND status = 'pending'`, id, identity)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		return nil
+	}
+	var one int
+	err = db.QueryRowContext(ctx, `SELECT 1 FROM jobs WHERE id = $1 AND identity = $2`, id, identity).Scan(&one)
+	if err == sql.ErrNoRows {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	return ErrNotPending
+}
+
 // Enqueue inserts a new job with status=pending, tagged with job.Identity.
 // job.Payload already holds raw JSON (the serialised api.InferRequest); it is
 // written straight into the JSONB column. Marshaling it again would base64-encode

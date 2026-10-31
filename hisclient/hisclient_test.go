@@ -140,3 +140,27 @@ func TestInferStreamReportsDeferred202(t *testing.T) {
 		t.Fatalf("want deferred 202, got %v", err)
 	}
 }
+
+func TestRelayCancelSendsDeleteAndMapsConflict(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.Header.Get(api.HeaderAPIKey) != "sk_x" {
+			t.Errorf("got %s with key %q", r.Method, r.Header.Get(api.HeaderAPIKey))
+		}
+		if r.URL.Path == "/job/pending" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(api.ErrorResponse{Code: api.ErrCodeNotPending, Message: "claimed"})
+	}))
+	defer srv.Close()
+
+	c := NewRelay(srv.URL, "sk_x")
+	if err := c.Cancel(context.Background(), "pending"); err != nil {
+		t.Fatalf("cancel pending: %v", err)
+	}
+	ae, ok := AsAPIError(c.Cancel(context.Background(), "claimed"))
+	if !ok || ae.HTTPStatus != http.StatusConflict || ae.Code != api.ErrCodeNotPending {
+		t.Fatalf("cancel claimed = %+v", ae)
+	}
+}

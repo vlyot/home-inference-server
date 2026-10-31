@@ -337,6 +337,11 @@ func (s *Server) handleInfer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.Reasoning != "" && req.Reasoning != api.ReasoningOff && req.Reasoning != api.ReasoningOn {
+		writeError(w, http.StatusBadRequest, api.ErrCodeInvalidRequest, `reasoning must be "off" or "on"`, req.CorrelationID)
+		return
+	}
+
 	if len(req.Tools) > 0 {
 		// The vision tier's chat template has no tool-calling grammar (see
 		// roadmap.md) — reject rather than silently ignoring the caller's tools.
@@ -610,6 +615,7 @@ func TranslateInferRequest(req api.InferRequest, requestID string) backend.Reque
 		Stream:         req.Stream,
 		ResponseFormat: req.ResponseFormat,
 		Tools:          translateTools(req.Tools),
+		Reasoning:      req.Reasoning,
 	}
 }
 

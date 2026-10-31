@@ -90,6 +90,13 @@ func (c *RelayClient) Result(ctx context.Context, jobID string) (*queue.ResultRe
 	return &out, nil
 }
 
+// Cancel deletes a job that the PC has not claimed yet (DELETE /job/{id}). A
+// job already claimed or finished returns an *APIError with Code
+// api.ErrCodeNotPending (HTTP 409).
+func (c *RelayClient) Cancel(ctx context.Context, jobID string) error {
+	return c.do(ctx, http.MethodDelete, "/job/"+jobID, nil, nil)
+}
+
 // Status fetches GET /status on the relay.
 func (c *RelayClient) Status(ctx context.Context) (*queue.QueueStatusResponse, error) {
 	var out queue.QueueStatusResponse

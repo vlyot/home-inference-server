@@ -104,6 +104,9 @@ type Request struct {
 	// ImageData and Tools is rejected before reaching the backend (see
 	// server.handleInfer). Empty = no tools offered.
 	Tools []Tool
+	// Reasoning is "off", "on" or "" (model default). Only the Messages path
+	// honours it, as chat_template_kwargs.enable_thinking.
+	Reasoning string
 }
 
 // Response is what a Backend returns after inference completes.

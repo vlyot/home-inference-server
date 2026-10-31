@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // NormalizeDSN appends sslmode=require to a Postgres DSN that does not already
@@ -38,8 +40,13 @@ type Config struct {
 	StackJWKSURL   string
 	StackProjectID string
 
-	// StaticAPIKey is the shared key for native / CLI clients and the PC worker.
+	// StaticAPIKey is the owner key: the owner's own native / CLI clients and
+	// the PC worker. It is the only credential the worker routes accept.
 	StaticAPIKey string
+
+	// AppIPSalt keys the hashed visitor address /apps/ask rate-limits by.
+	// Unset means a random salt per boot.
+	AppIPSalt string
 }
 
 // LoadConfig reads relay configuration from the environment, applying defaults.
@@ -55,6 +62,10 @@ func LoadConfig() (Config, error) {
 		StackJWKSURL:    os.Getenv("STACK_JWKS_URL"),
 		StackProjectID:  os.Getenv("STACK_PROJECT_ID"),
 		StaticAPIKey:    os.Getenv("QUEUE_API_KEY"),
+		AppIPSalt:       os.Getenv("APP_IP_SALT"),
+	}
+	if cfg.AppIPSalt == "" {
+		cfg.AppIPSalt = uuid.New().String()
 	}
 
 	if cfg.StackJWKSURL != "" && cfg.StackProjectID == "" {

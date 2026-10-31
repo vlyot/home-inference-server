@@ -218,6 +218,27 @@ func TestHandleInfer_ToolsWithoutTierFloorRejected(t *testing.T) {
 	}
 }
 
+// TestHandleInfer_InvalidReasoningRejected confirms reasoning only accepts
+// "off" and "on".
+func TestHandleInfer_InvalidReasoningRejected(t *testing.T) {
+	h := newHarness(t, 0)
+
+	body, _ := json.Marshal(api.InferRequest{
+		Modality:  api.ModalityText,
+		TextInput: &api.TextInput{Messages: []api.ChatMessage{{Role: "user", Content: "hi"}}},
+		Reasoning: "low",
+	})
+
+	resp, err := http.Post(h.ts.URL+api.PathInfer, "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /v1/infer: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
 // TestHandleInfer_ToolsWithPreferredTierMidAccepted confirms preferred_tier
 // alone (without min_tier) also satisfies the tier-floor requirement, since
 // it's an exact pin — a request pinned to "mid" can never land on weak.

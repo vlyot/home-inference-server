@@ -233,6 +233,7 @@ func chatStub(t *testing.T) (*httptest.Server, *stubState) {
 		st.lastChatMessages = len(body.Messages)
 		st.lastMaxTokens = body.MaxTokens
 		st.lastResponseFormat = string(body.ResponseFormat)
+		st.lastTemplateKwargs = body.ChatTemplateKwargs
 		resp := chatResp{}
 		resp.Choices = make([]struct {
 			Message struct {
@@ -267,6 +268,7 @@ type stubState struct {
 	lastChatMessages   int
 	lastMaxTokens      int
 	lastResponseFormat string
+	lastTemplateKwargs map[string]any
 }
 
 func TestInfer_UsesChatEndpointWhenMessagesPresent(t *testing.T) {
@@ -477,6 +479,37 @@ func TestChatComplete_NoResponseFormatWhenUnset(t *testing.T) {
 	}
 	if st.lastResponseFormat != "" {
 		t.Errorf("response_format = %q; want empty (omitted)", st.lastResponseFormat)
+	}
+}
+
+func TestChatComplete_ReasoningOffSendsEnableThinkingFalse(t *testing.T) {
+	srv, st := chatStub(t)
+	b := makeTestBackend(srv.URL)
+
+	_, err := b.Infer(context.Background(), backend.Request{
+		Messages:  []backend.Message{{Role: "user", Content: "hi"}},
+		Reasoning: "off",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if v, ok := st.lastTemplateKwargs["enable_thinking"]; !ok || v != false {
+		t.Errorf("chat_template_kwargs = %v; want enable_thinking false", st.lastTemplateKwargs)
+	}
+}
+
+func TestChatComplete_NoTemplateKwargsWhenReasoningUnset(t *testing.T) {
+	srv, st := chatStub(t)
+	b := makeTestBackend(srv.URL)
+
+	_, err := b.Infer(context.Background(), backend.Request{
+		Messages: []backend.Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if st.lastTemplateKwargs != nil {
+		t.Errorf("chat_template_kwargs = %v; want omitted", st.lastTemplateKwargs)
 	}
 }
 

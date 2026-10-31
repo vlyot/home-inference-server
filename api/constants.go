@@ -91,6 +91,10 @@ const (
 	// codes, this never fails the request — it appears only inside a resolved
 	// tool_calls[].error field.
 	ErrCodeToolRateLimited = "tool_rate_limited"
+	// ErrCodeNotPending is returned (HTTP 409) by the relay's DELETE
+	// /job/{id} when the caller's job has already been claimed by the PC or
+	// finished: only a job still waiting in the queue can be cancelled.
+	ErrCodeNotPending = "not_pending"
 )
 
 const (
@@ -107,4 +111,9 @@ const (
 	MinTierStrong = "strong"
 	MinTierMid    = "mid"
 	MinTierWeak   = "weak"
+)
+
+const (
+	ReasoningOff = "off"
+	ReasoningOn  = "on"
 )

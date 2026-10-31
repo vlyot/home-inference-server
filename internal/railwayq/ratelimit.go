@@ -28,17 +28,26 @@ func NewLimiter(perMin float64) *Limiter {
 
 // Allow reports whether the identity may perform one more request right now.
 func (l *Limiter) Allow(identity string) bool {
+	return l.AllowAt(identity, l.perMin)
+}
+
+// AllowAt is Allow with a per-identity rate, for app identities whose limit
+// comes from their spec. A changed rate takes effect on the next call.
+func (l *Limiter) AllowAt(identity string, perMin float64) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
+	burst := int(perMin)
+	if burst < 1 {
+		burst = 1
+	}
 	e, ok := l.seen[identity]
 	if !ok {
-		burst := int(l.perMin)
-		if burst < 1 {
-			burst = 1
-		}
-		e = &entry{lim: rate.NewLimiter(rate.Limit(l.perMin/60.0), burst)}
+		e = &entry{lim: rate.NewLimiter(rate.Limit(perMin/60.0), burst)}
 		l.seen[identity] = e
+	} else if e.lim.Limit() != rate.Limit(perMin/60.0) {
+		e.lim.SetLimit(rate.Limit(perMin / 60.0))
+		e.lim.SetBurst(burst)
 	}
 	e.lastSeen = time.Now()
 	return e.lim.Allow()

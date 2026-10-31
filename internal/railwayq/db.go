@@ -51,6 +51,25 @@ CREATE TABLE IF NOT EXISTS worker_heartbeat (
     worker_id    TEXT PRIMARY KEY,
     last_poll_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- apps holds one row per public client app; spec is an apps.Spec pushed by
+-- cmd/appadd. app_keys stores only sha256(key): a key is shown once, when
+-- issued. prefix is the first characters of the key, for listing and revoking.
+CREATE TABLE IF NOT EXISTS apps (
+    id          TEXT PRIMARY KEY,
+    enabled     BOOLEAN NOT NULL DEFAULT TRUE,
+    spec        JSONB NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS app_keys (
+    key_hash    TEXT PRIMARY KEY,
+    app_id      TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+    kind        TEXT NOT NULL CHECK (kind IN ('pk', 'sk')),
+    prefix      TEXT NOT NULL UNIQUE,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    revoked_at  TIMESTAMPTZ
+);
 `
 
 // Open opens a Postgres connection pool and applies the schema migration.

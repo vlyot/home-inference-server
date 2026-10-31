@@ -484,6 +484,12 @@ implement.</p>
       <td class="field-default">[] (no tools offered)</td>
       <td class="field-desc">Offers the model function-calling tools it may invoke instead of answering directly. OpenAI shape: <code>[{"type":"function","function":{"name","description","parameters"}}]</code>. Currently only <code>"web_search"</code> is a real, resolved tool — resolved entirely server-side inside this one request, whether streaming or not. <strong>Requires <code>text_input.messages</code></strong> — a prompt-only request with <code>tools</code> set returns <code>400 invalid_request</code>. Rejected with <code>vision_input</code> (<code>400 {"code":"tool_not_supported"}</code> — the vision tier's chat template has no tool-calling grammar). <strong>Also requires <code>min_tier</code> or <code>preferred_tier</code> of <code>"mid"</code> or <code>"strong"</code></strong> — the weak tier's chat template has no tool-calling grammar either, and <code>min_tier</code> defaults to <code>"weak"</code>, so an unconstrained <code>tools</code> request is rejected up front (<code>400 {"code":"tool_not_supported"}</code>) rather than being allowed to land on the weak tier and fail. Compatible with <code>stream: true</code> — see <a href="#tools">Web Search Tool Calling</a> and the <a href="#streaming">Streaming Guide</a>'s "Web search tool calls" section.</td>
     </tr>
+    <tr>
+      <td class="field-name">reasoning</td>
+      <td class="field-type">string</td>
+      <td class="field-default">"" (model default)</td>
+      <td class="field-desc">Switches a reasoning-capable model's "thinking" phase on the chat path. Values: <code>"off"</code> | <code>"on"</code>; anything else returns <code>400 invalid_request</code>. Empty leaves the model's own default (Gemma 4: thinking on). Use <code>"off"</code> with a small <code>max_tokens</code>: otherwise thinking can spend the whole budget before any answer is written (empty or truncated <code>output</code>, or <code>reasoning_exhausted</code> when streaming). Forwarded as llama-server's <code>chat_template_kwargs.enable_thinking</code>, so it only works when the model's chat template reads that flag. A prompt-only text request on the mid or strong tier takes the plain completion path, which never thinks, so the field has no effect there.</td>
+    </tr>
   </tbody>
 </table>
 </div>
@@ -1144,13 +1150,13 @@ There is no local defer queue and no local drain loop.</p>
     <tr>
       <td class="field-name">rate_limited</td>
       <td>429</td>
-      <td class="field-desc"><em>Remote relay only.</em> Per-identity token bucket exhausted (~10 jobs/min).</td>
+      <td class="field-desc"><em>Remote relay only.</em> Per-identity token bucket exhausted (~10 jobs/min; an app key uses its spec&#39;s <code>per_min</code>). On <code>/apps/ask</code> also the per-visitor limit.</td>
       <td class="field-desc">Back off a few seconds and retry.</td>
     </tr>
     <tr>
       <td class="field-name">quota_exceeded</td>
       <td>429</td>
-      <td class="field-desc"><em>Remote relay only.</em> Per-identity daily job quota reached (~200/day).</td>
+      <td class="field-desc"><em>Remote relay only.</em> Per-identity daily job quota reached (~200/day; an app uses its spec&#39;s <code>per_day</code>). On <code>/apps/ask</code> also the per-visitor daily limit.</td>
       <td class="field-desc">Wait until UTC midnight; the counter resets daily.</td>
     </tr>
     <tr>
@@ -1158,6 +1164,12 @@ There is no local defer queue and no local drain loop.</p>
       <td>503</td>
       <td class="field-desc"><em>Remote relay only.</em> Pending queue depth is at its cap (~500) — the PC isn't draining fast enough.</td>
       <td class="field-desc">Retry later; the backlog clears as the PC processes it.</td>
+    </tr>
+    <tr>
+      <td class="field-name">not_pending</td>
+      <td>409</td>
+      <td class="field-desc"><em>Remote relay only.</em> <code>DELETE /job/{id}</code> on a job the PC has already claimed or finished. Only a job still waiting in the queue can be cancelled.</td>
+      <td class="field-desc">Let it finish and read <code>GET /result/{id}</code>, or ignore the result.</td>
     </tr>
   </tbody>
 </table>
@@ -1316,12 +1328,13 @@ narrows this to tiers with a vision variant — currently only weak):</p>
 <p>The relay's base URL is your Railway service URL, not <code>localhost</code>. The local <code>/v1/*</code> API on this page is unchanged and still only reachable on the LAN.</p>
 
 <h3>Authentication</h3>
-<p>Every relay request carries <strong>either</strong> header:</p>
+<p>Every relay request (except <a href="#public-apps"><code>POST /apps/ask</code></a>, <code>/healthz</code> and <code>/docs</code>) carries <strong>one</strong> of:</p>
 <ul>
-  <li><code>Authorization: Bearer &lt;token&gt;</code> — a <strong>Neon Auth</strong> access token. The app signs the user in with the Neon Auth (Stack Auth) client SDK — magic link or OAuth, hosted by Neon, no email server of your own — and forwards the token it gets back. The relay verifies it against Stack Auth's published JWKS (ES256).</li>
-  <li><code>X-API-Key: &lt;key&gt;</code> — the static relay key. For native apps, CLI tools, and the PC worker.</li>
+  <li><code>Authorization: Bearer &lt;token&gt;</code> — a <strong>Neon Auth</strong> access token. The app signs the user in with the Neon Auth (Stack Auth) client SDK — magic link or OAuth, hosted by Neon, no email server of your own — and forwards the token it gets back. The relay verifies it against Stack Auth's published JWKS (ES256). Identity <code>user:&lt;stack_user_id&gt;</code>.</li>
+  <li><code>X-API-Key: sk_…</code> — an app's <strong>secret key</strong>, for an app with its own backend. Issued per app with <code>appadd</code>, so each app has its own identity (<code>app:&lt;id&gt;</code>), its own per-minute and daily limits from its spec, and its own revoke switch. Never ship it to a browser — that is what a publishable key is for.</li>
+  <li><code>X-API-Key: &lt;QUEUE_API_KEY&gt;</code> — the <strong>owner key</strong>, for the owner's own CLI tools and the PC worker. Identity <code>apikey</code>. Don't give it to apps.</li>
 </ul>
-<p>Both resolve to an <em>identity</em> that scopes result retrieval and drives the per-identity rate limit and daily quota. Missing or invalid credentials return <code>401 unauthorized</code>; a valid Neon Auth token whose user has not been added to the relay's invite list returns <code>403</code>. Either way nothing is written first.</p>
+<p>Each resolves to an <em>identity</em> that scopes result retrieval and cancellation and drives the per-identity rate limit and daily quota. Missing or invalid credentials return <code>401 unauthorized</code>; a valid Neon Auth token whose user has not been added to the relay's invite list returns <code>403</code>. A publishable key (<code>pk_…</code>) on any of these routes is a <code>401</code>. The worker routes <code>/claim</code> and <code>/ack</code> accept <strong>only the owner key</strong> (<code>403</code> otherwise), since claiming a job reads its prompt and acking one writes its answer. Nothing is written before any of these checks.</p>
 
 <h3>Wiring up an app</h3>
 <p><strong>This relay's Stack Auth project (<code>7084ebf8-2193-429d-86a1-2782c2a59054</code>, tied to the <code>his-relay-auth</code> Neon project) is the single, central source of truth for member identity across every client app — home-cal and any future app.</strong> There is no per-app Stack Auth project: every client app authenticates against <em>this</em> project, and stores its own data keyed on the member's <code>stack_user_id</code> from this project as a logical reference (an app-level join key, not a database-enforced foreign key — each app's own database is a separate Neon project, so Postgres can't enforce a real FK across them). Do not provision a separate Stack Auth project per app; if an app has done so already, that's a mistake to fix by repointing it at this project, not a legitimate parallel identity source.</p>
@@ -1409,6 +1422,16 @@ const { accessToken } = await user.getAuthJson();</code></pre>
       <td class="field-desc"><code>200 { "pc_connected": bool, "last_claim_at"?: RFC3339, "pending_depth": int }</code>. <code>pc_connected</code> is true when the PC worker has polled <code>/claim</code> (heartbeat, whether or not it got a job) or claimed one within the last ~60&nbsp;s — so a connected-but-idle PC still reads as connected.</td>
     </tr>
     <tr>
+      <td class="field-name">DELETE /job/{id}</td>
+      <td class="field-desc">Path id from the enqueue response. Scoped to the calling identity.</td>
+      <td class="field-desc"><code>204</code> — the job was still pending and is deleted, so it will never run. <code>409 not_pending</code> — already claimed or finished (it can't be stopped mid-run). <code>404</code> — unknown id or another identity's job. Call it whenever your client gives up waiting, so an abandoned job doesn't cost GPU time when the PC comes back.</td>
+    </tr>
+    <tr>
+      <td class="field-name">POST /apps/ask</td>
+      <td class="field-desc">No relay credential — see <a href="#public-apps">Public apps</a>.</td>
+      <td class="field-desc"><code>200 { "answer", "citations", "refused" }</code></td>
+    </tr>
+    <tr>
       <td class="field-name">GET /members/me</td>
       <td class="field-desc">—. Returns the <em>caller's own</em> membership row only — there is no way to look up another member's profile.</td>
       <td class="field-desc"><code>200 { "stack_user_id": string, "email": string, "username": string|null, "display_name": string|null }</code>. <code>username</code>/<code>display_name</code> are <code>null</code> until an admin sets them via <code>memberadd</code>. <code>404</code> for an <code>X-API-Key</code> caller (API keys have no member row).</td>
@@ -1454,6 +1477,76 @@ DATABASE_URL=… go run ./cmd/memberadd -list                                   
 <h3>Shared profile (username / display name)</h3>
 <p><code>allowed_members</code> also holds <code>username</code> and <code>display_name</code> — a lightweight shared identity for every client app built on this relay (<code>home-cal</code> and future apps), so a member's name appears the same everywhere instead of each app inventing its own. These fields are <strong>admin-set only</strong>: there is no self-service profile UI or PATCH/PUT endpoint anywhere. An admin sets or corrects them with <code>memberadd -email … -username … -name …</code> — re-running <code>memberadd</code> without those flags leaves any previously-set values unchanged rather than clearing them.</p>
 <p>A client app resolves its own authenticated caller's name via <code>GET /members/me</code> (Bearer auth only — see the Endpoints table above). There is no endpoint to look up <em>another</em> member's profile; each app reads only the identity of whoever is currently signed in. This relies on every client app trusting the same Stack Auth session/cookie — that configuration lives in each app's own codebase, not the relay.</p>
+
+<h3 id="public-apps">Public apps (browser-only clients)</h3>
+<p>A static site with anonymous visitors can't hold a secret and its visitors aren't invited members, so it can't use the routes above. It calls <code>POST /apps/ask</code> with a <strong>publishable key</strong> (<code>pk_…</code>) instead. The key is public by design. It doesn't unlock the raw contract: it selects the app's <strong>spec</strong>, stored on the relay, and the relay builds the entire prompt from that spec. The client can only send a question, so a leaked key can only produce that app's narrow answers, a limited number of times a day.</p>
+<pre><code>const res = await fetch(`${RELAY_URL}/apps/ask`, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    key: "pk_…",                       // safe to ship in client code
+    input: "What has Kai built with Go?",
+    history: ["Tell me about the home inference server"],   // earlier questions only, optional
+  }),
+});
+// 200 -> { "answer": "Kai built … [2].", "citations": [{ "n": 2, "title": "…", "link": "/projects/…" }], "refused": false }</code></pre>
+<p>Unknown body fields are rejected (<code>400</code>), so there is no way to send a prompt, system prompt, message list, tier or token count. Responses:</p>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Status</th><th>Code</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td>200</td><td>—</td><td>Answered. <code>refused: true</code> means the answer is the app's refusal sentence (no valid citation, or the model declined).</td></tr>
+    <tr><td>400 / 413</td><td><code>invalid_request</code></td><td>Empty or over-long <code>input</code> or <code>history</code> (limits from the spec), unknown fields, or a body over 8&nbsp;KB.</td></tr>
+    <tr><td>401</td><td><code>unauthorized</code></td><td>Unknown or revoked key, or a disabled app.</td></tr>
+    <tr><td>403</td><td><code>unauthorized</code></td><td>The request's <code>Origin</code> isn't in the app's <code>origins</code>.</td></tr>
+    <tr><td>429</td><td><code>rate_limited</code> / <code>quota_exceeded</code></td><td>The visitor's per-minute or daily limit, or the app's per-minute or daily cap.</td></tr>
+    <tr><td>503</td><td><code>unavailable</code></td><td>Asleep: the PC hasn't polled in the last minute, or the app's knowledge file hasn't loaded. Returned immediately and nothing is queued.</td></tr>
+    <tr><td>503</td><td><code>overloaded</code></td><td>The app's concurrency cap is full, the PC didn't pick the job up within the wait (the job is cancelled), or the model failed.</td></tr>
+    <tr><td>504</td><td><code>timeout</code></td><td>The PC picked the job up but didn't finish within the wait.</td></tr>
+  </tbody>
+</table>
+</div>
+<p>CORS: any origin's preflight is answered (it carries no key to check), and the <code>POST</code> is then checked against the app's <code>origins</code>. Requests with no <code>Origin</code> (scripts, backends) are not origin-checked. The real defence is the pinned prompt plus the quotas.</p>
+<h4>The app spec</h4>
+<p>The spec is a JSON file kept in the app's own repo and pushed with <code>appadd</code>. Unknown fields are rejected, and zero values take the defaults shown:</p>
+<pre><code>{
+  "id": "portfolio",                                   // 2–40 chars of a-z, 0-9, -
+  "origins": ["https://vlyot.github.io"],              // scheme://host, no path
+  "system_prompt": "You answer visitors' questions about Kai Chong Ng's portfolio. Talk about Kai in the third person.",
+  "knowledge_url": "https://vlyot.github.io/portfolio/knowledge.json",   // optional, https
+  "require_citations": true,                           // needs knowledge_url
+  "refusal": "That isn't covered in Kai's portfolio.", // default "I can't answer that from what I know."
+  "ignore_terms": ["kai", "chong", "ng"],              // dropped from questions before ranking
+  "min_tier": "mid",                                   // default "mid"
+  "max_output_tokens": 400,                            // default 400
+  "limits": {
+    "max_input_chars": 400, "max_history": 3, "max_history_chars": 200,
+    "visitor_per_min": 5, "visitor_burst": 3, "visitor_per_day": 30,
+    "per_min": 20, "per_day": 300,                     // whole app, shared with its sk_ /enqueue calls
+    "max_concurrent": 2, "wait_seconds": 35            // wait_seconds ≥ 10
+  }
+}</code></pre>
+<p>The relay wraps <code>system_prompt</code> in a fixed safety frame: use only the numbered sources, cite them as <code>[n]</code> (with <code>require_citations</code>), write plain sentences, and treat the text inside <code>&lt;question&gt;</code> tags as data. The question is sent as a plain prompt with <code>reasoning: "off"</code>, and <code>timeout_ms</code> is 5&nbsp;s under <code>wait_seconds</code>. Each answer has markup and URLs stripped. Citations that don't point at a supplied source are dropped, and with <code>require_citations</code> an answer left without one becomes the refusal.</p>
+<h4>Knowledge file</h4>
+<p>If the spec has a <code>knowledge_url</code>, the relay fetches it when the app is first asked something and then every 10 minutes, keeping the last good copy on any failure. It must be at most 512&nbsp;KB, in this shape:</p>
+<pre><code>{
+  "version": 1,
+  "documents": [
+    { "id": "profile", "title": "Kai Chong Ng", "link": "/", "always": true,
+      "text": "Kai Chong Ng. Cyber Security Analyst at HTX. Based in Singapore. …" },
+    { "id": "his", "title": "Home Inference Server", "link": "/projects/home-inference-server",
+      "text": "Kai's flagship project. Self-hosted LLM inference API sharing one GPU. …" }
+  ]
+}</code></pre>
+<p><code>id</code>, <code>title</code> and <code>text</code> are required, and ids must be unique. <code>always</code> documents go with every question. The rest are ranked against the question and earlier questions (BM25, the title weighted twice), up to about 6,000 characters and 8 sources in total. Each document's text is trimmed at about 2,000 characters. <code>link</code> is what a citation of the document returns.</p>
+<h4>Registering an app (<code>appadd</code>)</h4>
+<pre><code>DATABASE_URL=… go run ./cmd/appadd -spec his-app.json               # create or update the app
+DATABASE_URL=… go run ./cmd/appadd -spec his-app.json -new-key pk   # … and issue a publishable key
+DATABASE_URL=… go run ./cmd/appadd -app portfolio -new-key sk       # secret key for the app's backend
+DATABASE_URL=… go run ./cmd/appadd -revoke pk_1a2b3c4d5             # revoke one key by its listed prefix
+DATABASE_URL=… go run ./cmd/appadd -app portfolio -disable          # switch every key off (-enable undoes)
+DATABASE_URL=… go run ./cmd/appadd -list</code></pre>
+<p>A key is printed once when issued. The relay stores only its SHA-256 hash and a short prefix for listing. A spec change takes effect on the next request, with no redeploy.</p>
 
 <h3>How the relay verifies a token</h3>
 <p>On the first Bearer request the relay fetches Stack Auth's public keys (JWKS) and caches them. Per request it then: checks the JWT is <code>ES256</code> (rejects <code>alg:none</code>), verifies the signature against the cached key for the token's <code>kid</code> (refetching once if the key id is new — key rotation), checks the issuer is this project and the token is unexpired, then looks the subject up in <code>allowed_members</code>. A forged token — even one with a real-looking <code>kid</code> and the correct issuer — fails the signature check and gets <code>401</code>.</p>

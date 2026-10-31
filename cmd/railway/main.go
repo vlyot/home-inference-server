@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ngkaichong/home-inference-server/internal/apps"
 	"github.com/ngkaichong/home-inference-server/internal/railwayq"
 	"github.com/ngkaichong/home-inference-server/internal/stackauth"
 )
@@ -55,7 +56,7 @@ func main() {
 
 	httpServer := &http.Server{
 		Addr:    fmt.Sprintf(":%s", port),
-		Handler: railwayq.New(db, cfg, limiter, verifier),
+		Handler: railwayq.New(db, cfg, limiter, verifier, apps.NewRegistry(ctx, 10*time.Minute)),
 	}
 
 	go func() {

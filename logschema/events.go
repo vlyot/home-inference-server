@@ -58,6 +58,13 @@ const (
 	EventQuotaExceeded EventKind = "relay.quota_exceeded"
 	EventResultServed  EventKind = "relay.result_served"
 	EventResultsPurged EventKind = "relay.results_purged"
+
+	// Public apps (relay POST /apps/ask)
+	EventAskAnswered EventKind = "app.ask.answered"
+	EventAskRefused  EventKind = "app.ask.refused"
+	EventAskLimited  EventKind = "app.ask.limited"
+	EventAskAsleep   EventKind = "app.ask.asleep"
+	EventAskFailed   EventKind = "app.ask.failed"
 )
 
 // CorrelationIDPrefix is prepended to UUID v4 values for human-scannable log output.
