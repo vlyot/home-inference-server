@@ -53,10 +53,11 @@ func BuildRequest(spec Spec, sources []Doc, question string, history []string) a
 		Temperature:  0.2,
 		// The model run must finish a little before the relay stops waiting,
 		// or a late answer is computed for a caller who has already gone.
-		TimeoutMS: (spec.Limits.WaitSeconds - 5) * 1000,
-		Priority:  api.PriorityNormal,
-		MinTier:   spec.MinTier,
-		Reasoning: api.ReasoningOff,
+		TimeoutMS:     (spec.Limits.WaitSeconds - 5) * 1000,
+		Priority:      api.PriorityNormal,
+		MinTier:       spec.MinTier,
+		PreferredTier: spec.PreferredTier,
+		Reasoning:     api.ReasoningOff,
 	}
 }
 

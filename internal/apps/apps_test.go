@@ -61,6 +61,19 @@ func TestParseSpecFillsDefaults(t *testing.T) {
 	if s.Refusal != "" {
 		t.Fatalf("refusal %q set on an app without knowledge", s.Refusal)
 	}
+	if s.PreferredTier != "" || s.Limits.HostedVisitorPerDay != s.Limits.VisitorPerDay {
+		t.Fatalf("preferred_tier=%q hosted_visitor_per_day=%d", s.PreferredTier, s.Limits.HostedVisitorPerDay)
+	}
+}
+
+func TestParseSpecKeepsHostedVisitorLimit(t *testing.T) {
+	s, err := ParseSpec([]byte(`{"id":"demo","origins":["https://a.test"],"system_prompt":"x","preferred_tier":"mid","limits":{"visitor_per_day":30,"hosted_visitor_per_day":5}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.PreferredTier != api.MinTierMid || s.Limits.VisitorPerDay != 30 || s.Limits.HostedVisitorPerDay != 5 {
+		t.Fatalf("got preferred_tier=%q limits=%+v", s.PreferredTier, s.Limits)
+	}
 }
 
 func TestParseSpecRejectsBadSpecs(t *testing.T) {
@@ -73,7 +86,10 @@ func TestParseSpecRejectsBadSpecs(t *testing.T) {
 		"citations no source": `{"id":"demo","origins":["https://a.test"],"system_prompt":"x","require_citations":true}`,
 		"http knowledge":      `{"id":"demo","origins":["https://a.test"],"system_prompt":"x","knowledge_url":"http://a.test/k.json"}`,
 		"unknown tier":        `{"id":"demo","origins":["https://a.test"],"system_prompt":"x","min_tier":"huge"}`,
+		"unknown pin":         `{"id":"demo","origins":["https://a.test"],"system_prompt":"x","preferred_tier":"huge"}`,
+		"pin below floor":     `{"id":"demo","origins":["https://a.test"],"system_prompt":"x","min_tier":"mid","preferred_tier":"weak"}`,
 		"negative limit":      `{"id":"demo","origins":["https://a.test"],"system_prompt":"x","limits":{"per_day":-1}}`,
+		"negative hosted":     `{"id":"demo","origins":["https://a.test"],"system_prompt":"x","limits":{"hosted_visitor_per_day":-1}}`,
 		"short wait":          `{"id":"demo","origins":["https://a.test"],"system_prompt":"x","limits":{"wait_seconds":5}}`,
 	} {
 		if _, err := ParseSpec([]byte(body)); err == nil {
@@ -154,9 +170,10 @@ func TestBuildRequestTakesKnobsFromSpec(t *testing.T) {
 	spec := testSpec()
 	spec.MaxOutputTokens = 250
 	spec.MinTier = api.MinTierStrong
+	spec.PreferredTier = api.MinTierStrong
 	req := BuildRequest(spec, nil, "hi", nil)
-	if req.MaxTokens != 250 || req.MinTier != api.MinTierStrong || req.Reasoning != api.ReasoningOff {
-		t.Fatalf("max_tokens=%d min_tier=%q reasoning=%q", req.MaxTokens, req.MinTier, req.Reasoning)
+	if req.MaxTokens != 250 || req.MinTier != api.MinTierStrong || req.PreferredTier != api.MinTierStrong || req.Reasoning != api.ReasoningOff {
+		t.Fatalf("max_tokens=%d min_tier=%q preferred_tier=%q reasoning=%q", req.MaxTokens, req.MinTier, req.PreferredTier, req.Reasoning)
 	}
 	if req.TimeoutMS != (spec.Limits.WaitSeconds-5)*1000 || req.Temperature > 0.3 {
 		t.Fatalf("timeout=%d temperature=%v", req.TimeoutMS, req.Temperature)

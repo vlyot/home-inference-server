@@ -493,17 +493,51 @@ func TestAskHostedCountsAppUsage(t *testing.T) {
 
 func TestAskHostedVisitorDailyLimit(t *testing.T) {
 	f := newFakeAsk("")
-	f.setLimits(askKey, func(l *apps.Limits) { l.VisitorPerDay = 5 })
+	f.setLimits(askKey, func(l *apps.Limits) { l.VisitorPerDay, l.HostedVisitorPerDay = 30, 5 })
 	model := &fakeHosted{output: "Kai built GrabMaps [2]."}
 	h := hostedAsk(f, model)
 	for i := 0; i < 5; i++ {
-		if rr := askPost(t, h, question, nil); rr.Code != http.StatusOK {
-			t.Fatalf("question %d = %d, want 200", i+1, rr.Code)
+		rr := askPost(t, h, question, nil)
+		if a := decodeAnswer(t, rr); rr.Code != http.StatusOK || a.Remaining != 4-i {
+			t.Fatalf("question %d = %d with %d left, want 200 with %d", i+1, rr.Code, a.Remaining, 4-i)
 		}
 	}
 	rr := askPost(t, h, question, nil)
 	if rr.Code != http.StatusTooManyRequests || errCode(t, rr) != api.ErrCodeQuotaExceeded || model.calls != 5 {
 		t.Fatalf("6th question = %d %s after %d calls, want 429 quota_exceeded", rr.Code, errCode(t, rr), model.calls)
+	}
+}
+
+func TestAskPCAndHostedAreCountedApart(t *testing.T) {
+	f := newFakeAsk("Kai built GrabMaps [2].")
+	f.setLimits(askKey, func(l *apps.Limits) { l.VisitorPerDay, l.HostedVisitorPerDay = 3, 1 })
+	model := &fakeHosted{output: "Kai built GrabMaps [2]."}
+	h := handleAsk(Config{AppIPSalt: "salt"}, f, NewLimiter(10), testKnowledge(), model)
+
+	// Two PC answers leave the hosted allowance untouched.
+	for i := 0; i < 2; i++ {
+		rr := askPost(t, h, question, nil)
+		if a := decodeAnswer(t, rr); a.ServedBy != apps.ServedByPC || a.Remaining != 2-i {
+			t.Fatalf("PC question %d = %+v, want %d left", i+1, a, 2-i)
+		}
+	}
+	f.connected = false
+	rr := askPost(t, h, question, nil)
+	if a := decodeAnswer(t, rr); a.ServedBy != apps.ServedByHosted || a.Remaining != 0 {
+		t.Fatalf("first hosted question = %+v, want served with 0 left", a)
+	}
+	if rr := askPost(t, h, question, nil); errCode(t, rr) != api.ErrCodeQuotaExceeded {
+		t.Fatalf("second hosted question = %d %s, want quota_exceeded", rr.Code, errCode(t, rr))
+	}
+
+	// Back on the PC, its own count carries on where it was.
+	f.connected = true
+	rr = askPost(t, h, question, nil)
+	if a := decodeAnswer(t, rr); a.ServedBy != apps.ServedByPC || a.Remaining != 0 {
+		t.Fatalf("third PC question = %+v, want served with 0 left", a)
+	}
+	if rr := askPost(t, h, question, nil); errCode(t, rr) != api.ErrCodeQuotaExceeded {
+		t.Fatalf("fourth PC question = %d %s, want quota_exceeded", rr.Code, errCode(t, rr))
 	}
 }
 

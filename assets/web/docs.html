@@ -1429,7 +1429,7 @@ const { accessToken } = await user.getAuthJson();</code></pre>
     <tr>
       <td class="field-name">POST /apps/ask</td>
       <td class="field-desc">No relay credential — see <a href="#public-apps">Public apps</a>.</td>
-      <td class="field-desc"><code>200 { "answer", "citations", "refused", "served_by" }</code></td>
+      <td class="field-desc"><code>200 { "answer", "citations", "refused", "served_by", "remaining" }</code></td>
     </tr>
     <tr>
       <td class="field-name">GET /apps/status</td>
@@ -1494,8 +1494,9 @@ DATABASE_URL=… go run ./cmd/memberadd -list                                   
     history: ["Tell me about the home inference server"],   // earlier questions only, optional
   }),
 });
-// 200 -> { "answer": "Kai built … [2].", "citations": [{ "n": 2, "title": "…", "link": "/projects/…" }], "refused": false, "served_by": "pc" }</code></pre>
-<p><strong>While the PC is offline.</strong> When the relay has <code>OPENROUTER_API_KEY</code> set, a question that arrives while the PC is offline goes through every check below, then the same built request is sent once to a hosted model (<code>HOSTED_MODEL</code>, default <code>nvidia/nemotron-3-ultra-550b-a55b:free</code>) through OpenRouter, with reasoning off and the spec's token cap, bounded by <code>wait_seconds</code>. The reply is cleaned and citation-checked like the PC's, counts against the app's daily cap, and comes back with <code>"served_by": "hosted"</code>. There is no retry and no second model: any failure is a <code>503 unavailable</code>. Questions answered this way leave Kai's hardware for OpenRouter and the model's provider, whose free tiers may log prompts.</p>
+// 200 -> { "answer": "Kai built … [2].", "citations": [{ "n": 2, "title": "…", "link": "/projects/…" }], "refused": false, "served_by": "pc", "remaining": 29 }</code></pre>
+<p><code>remaining</code> is how many more questions this visitor may ask today on the path that answered: PC answers count against <code>visitor_per_day</code>, hosted answers against <code>hosted_visitor_per_day</code>.</p>
+<p><strong>While the PC is offline.</strong> When the relay has <code>OPENROUTER_API_KEY</code> set, a question that arrives while the PC is offline goes through every check below, then the same built request is sent once to a hosted model (<code>HOSTED_MODEL</code>, default <code>nvidia/nemotron-3-ultra-550b-a55b:free</code>) through OpenRouter, with reasoning off and the spec's token cap, bounded by <code>wait_seconds</code>. The reply is cleaned and citation-checked like the PC's, counts against the app's daily cap and the visitor's separate hosted count (<code>hosted_visitor_per_day</code>), and comes back with <code>"served_by": "hosted"</code>. There is no retry and no second model: any failure is a <code>503 unavailable</code>. Questions answered this way leave Kai's hardware for OpenRouter and the model's provider, whose free tiers may log prompts.</p>
 <p>Unknown body fields are rejected (<code>400</code>), so there is no way to send a prompt, system prompt, message list, tier or token count. Responses:</p>
 <div class="table-wrap">
 <table>
@@ -1524,10 +1525,12 @@ DATABASE_URL=… go run ./cmd/memberadd -list                                   
   "refusal": "That isn't covered in Kai's portfolio.", // default "I can't answer that from what I know."
   "ignore_terms": ["kai", "chong", "ng"],              // dropped from questions before ranking
   "min_tier": "mid",                                   // default "mid"
+  "preferred_tier": "mid",                             // optional exact pin, not below min_tier
   "max_output_tokens": 400,                            // default 400
   "limits": {
     "max_input_chars": 400, "max_history": 3, "max_history_chars": 200,
     "visitor_per_min": 5, "visitor_burst": 3, "visitor_per_day": 30,
+    "hosted_visitor_per_day": 5,                       // default visitor_per_day; PC answers never use it
     "per_min": 20, "per_day": 300,                     // whole app, shared with its sk_ /enqueue calls
     "max_concurrent": 2, "wait_seconds": 35            // wait_seconds ≥ 10
   }

@@ -52,10 +52,13 @@ type Spec struct {
 	// IgnoreTerms are dropped from questions before ranking — words every
 	// document is about (the site owner's name), which say nothing about
 	// relevance.
-	IgnoreTerms     []string `json:"ignore_terms,omitempty"`
-	MinTier         string   `json:"min_tier,omitempty"`
-	MaxOutputTokens int      `json:"max_output_tokens,omitempty"`
-	Limits          Limits   `json:"limits"`
+	IgnoreTerms []string `json:"ignore_terms,omitempty"`
+	MinTier     string   `json:"min_tier,omitempty"`
+	// PreferredTier, when set, pins the PC to exactly this tier instead of the
+	// largest one that fits in VRAM. It can't sit below MinTier.
+	PreferredTier   string `json:"preferred_tier,omitempty"`
+	MaxOutputTokens int    `json:"max_output_tokens,omitempty"`
+	Limits          Limits `json:"limits"`
 }
 
 // Limits bound what one app can consume. Zero values take the defaults in
@@ -69,6 +72,10 @@ type Limits struct {
 	VisitorPerMin float64 `json:"visitor_per_min,omitempty"`
 	VisitorBurst  int     `json:"visitor_burst,omitempty"`
 	VisitorPerDay int     `json:"visitor_per_day,omitempty"`
+	// HostedVisitorPerDay is the separate daily count for questions the
+	// hosted model answers while the PC is offline; it defaults to
+	// VisitorPerDay. Answers from the PC never use it up.
+	HostedVisitorPerDay int `json:"hosted_visitor_per_day,omitempty"`
 
 	// Whole app: shared by /apps/ask and the app's secret-key /enqueue calls.
 	PerMin float64 `json:"per_min,omitempty"`
@@ -121,6 +128,7 @@ func (s *Spec) ApplyDefaults() {
 	}
 	setInt(&l.VisitorBurst, 3)
 	setInt(&l.VisitorPerDay, 30)
+	setInt(&l.HostedVisitorPerDay, l.VisitorPerDay)
 	if l.PerMin == 0 {
 		l.PerMin = 20
 	}
@@ -165,9 +173,18 @@ func (s *Spec) Validate() error {
 	default:
 		return fmt.Errorf("app spec: unknown min_tier %q", s.MinTier)
 	}
+	if s.PreferredTier != "" {
+		rank := map[string]int{api.MinTierWeak: 1, api.MinTierMid: 2, api.MinTierStrong: 3}
+		if rank[s.PreferredTier] == 0 {
+			return fmt.Errorf("app spec: unknown preferred_tier %q", s.PreferredTier)
+		}
+		if rank[s.PreferredTier] < rank[s.MinTier] {
+			return errors.New("app spec: preferred_tier is below min_tier")
+		}
+	}
 	l := s.Limits
 	if s.MaxOutputTokens < 0 || l.MaxInputChars < 0 || l.MaxHistory < 0 || l.MaxHistoryChars < 0 ||
-		l.VisitorPerMin < 0 || l.VisitorBurst < 0 || l.VisitorPerDay < 0 ||
+		l.VisitorPerMin < 0 || l.VisitorBurst < 0 || l.VisitorPerDay < 0 || l.HostedVisitorPerDay < 0 ||
 		l.PerMin < 0 || l.PerDay < 0 || l.MaxConcurrent < 0 || l.WaitSeconds < 0 {
 		return errors.New("app spec: limits must not be negative")
 	}

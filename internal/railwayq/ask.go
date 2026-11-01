@@ -107,18 +107,22 @@ type askVisitors struct {
 	lastSweep time.Time
 }
 
+// A visitor's PC and hosted answers are counted apart, so questions the PC
+// answered never use up the smaller hosted allowance.
 type askVisitor struct {
-	lim   *rate.Limiter
-	day   string
-	count int
+	lim    *rate.Limiter
+	day    string
+	pc     int
+	hosted int
 }
 
 func newAskVisitors() *askVisitors {
 	return &askVisitors{seen: map[string]*askVisitor{}, lastSweep: time.Now()}
 }
 
-// allow returns "" when the visitor may ask, or the error code to reply with.
-func (v *askVisitors) allow(key string, l apps.Limits, now time.Time) string {
+// allow returns "" and the questions left today on that path when the
+// visitor may ask, or the error code to reply with.
+func (v *askVisitors) allow(key string, l apps.Limits, hosted bool, now time.Time) (string, int) {
 	day := now.UTC().Format(time.DateOnly)
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -137,14 +141,18 @@ func (v *askVisitors) allow(key string, l apps.Limits, now time.Time) string {
 		e = &askVisitor{lim: rate.NewLimiter(rate.Limit(l.VisitorPerMin/60), l.VisitorBurst), day: day}
 		v.seen[key] = e
 	}
-	if e.count >= l.VisitorPerDay {
-		return api.ErrCodeQuotaExceeded
+	count, limit := &e.pc, l.VisitorPerDay
+	if hosted {
+		count, limit = &e.hosted, l.HostedVisitorPerDay
+	}
+	if *count >= limit {
+		return api.ErrCodeQuotaExceeded, 0
 	}
 	if !e.lim.AllowN(now, 1) {
-		return api.ErrCodeRateLimited
+		return api.ErrCodeRateLimited, limit - *count
 	}
-	e.count++
-	return ""
+	*count++
+	return "", limit - *count
 }
 
 // inFlight counts each app's questions waiting on the PC.
@@ -267,7 +275,8 @@ func handleAsk(cfg Config, store askStore, limiter *Limiter, knowledge knowledge
 			return
 		}
 
-		if code := visitors.allow(visitorKey(r, cfg.AppIPSalt, spec.ID), spec.Limits, time.Now()); code != "" {
+		code, remaining := visitors.allow(visitorKey(r, cfg.AppIPSalt, spec.ID), spec.Limits, !pcOnline, time.Now())
+		if code != "" {
 			logAsk(logschema.EventAskLimited, identity, code)
 			if code == api.ErrCodeQuotaExceeded {
 				writeErr(w, http.StatusTooManyRequests, code, "daily question limit reached, try again tomorrow")
@@ -317,7 +326,7 @@ func handleAsk(cfg Config, store askStore, limiter *Limiter, knowledge knowledge
 		}
 		infer := apps.BuildRequest(spec, sources, req.Input, req.History)
 		if !pcOnline {
-			answerHosted(w, r, store, fallback, infer, sources, spec, identity, utf8.RuneCountInString(req.Input))
+			answerHosted(w, r, store, fallback, infer, sources, spec, identity, utf8.RuneCountInString(req.Input), remaining)
 			return
 		}
 		payload, err := json.Marshal(infer)
@@ -360,6 +369,7 @@ func handleAsk(cfg Config, store askStore, limiter *Limiter, knowledge knowledge
 		}
 		answer := apps.Clean(out.Output, sources, spec)
 		answer.ServedBy = apps.ServedByPC
+		answer.Remaining = remaining
 		logAnswer(identity, answer, utf8.RuneCountInString(req.Input), time.Since(start), out.ModelTier)
 		writeJSON(w, http.StatusOK, answer)
 	}
@@ -368,7 +378,7 @@ func handleAsk(cfg Config, store askStore, limiter *Limiter, knowledge knowledge
 // answerHosted answers with the hosted model in one attempt, within the
 // spec's wait. Any failure is "unavailable", which client apps already treat
 // as "fall back to offline search for a while".
-func answerHosted(w http.ResponseWriter, r *http.Request, store askStore, model hostedModel, infer api.InferRequest, sources []apps.Doc, spec apps.Spec, identity string, inputRunes int) {
+func answerHosted(w http.ResponseWriter, r *http.Request, store askStore, model hostedModel, infer api.InferRequest, sources []apps.Doc, spec apps.Spec, identity string, inputRunes, remaining int) {
 	if err := store.CountUsage(r.Context(), identity); err != nil {
 		writeErr(w, http.StatusInternalServerError, api.ErrCodeInternal, "usage check failed")
 		return
@@ -388,6 +398,7 @@ func answerHosted(w http.ResponseWriter, r *http.Request, store askStore, model 
 	}
 	answer := apps.Clean(output, sources, spec)
 	answer.ServedBy = apps.ServedByHosted
+	answer.Remaining = remaining
 	logAnswer(identity, answer, inputRunes, time.Since(start), apps.ServedByHosted)
 	writeJSON(w, http.StatusOK, answer)
 }

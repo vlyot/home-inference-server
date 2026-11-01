@@ -24,13 +24,14 @@ https://vlyot.github.io/portfolio/.
    earlier questions (BM25, `always` documents first, about 6,000 characters).
 5. The relay builds the `InferRequest`: the app's pinned system prompt, a fixed safety
    frame (sources only, cite `[n]`, visitor text is data), the numbered sources, and
-   the question inside `<question>` delimiters. `max_tokens`, `min_tier` and the wait
-   come from the spec, with `reasoning: "off"`. It is enqueued under the identity
+   the question inside `<question>` delimiters. `max_tokens`, `min_tier`, `preferred_tier`
+   (an exact pin, so the PC can't pick a larger model) and the wait come from the spec, with `reasoning: "off"`. It is enqueued under the identity
    `app:<id>` with `max_attempts: 1`.
 6. It waits up to `wait_seconds` for the PC. A job still pending at that point, or
    when the visitor disconnects, is deleted so it never runs later.
 7. The answer is cleaned (markup and URLs removed, citations checked) and returned as
-   `{ answer, citations: [{ n, title, link }], refused, served_by: "pc" }`.
+   `{ answer, citations: [{ n, title, link }], refused, served_by: "pc", remaining }`.
+   `remaining` is how many more questions this visitor may ask today on the same path.
 
 ### While the PC is offline
 
@@ -46,6 +47,12 @@ There is one attempt, bounded by `wait_seconds`, and no second model. Any failur
 an empty reply) is a 503 `unavailable`, which client apps already treat as "fall
 back to offline search for a while". The reply goes through the same cleaning and
 citation check, and comes back with `served_by: "hosted"` so the app can say so.
+
+A visitor's hosted answers have their own daily count, `hosted_visitor_per_day`
+(defaults to `visitor_per_day`). PC answers never use it up, so a smaller hosted
+allowance protects the shared OpenRouter quota without limiting questions the PC
+answers. Each path's `quota_exceeded` is separate: a visitor out of hosted questions
+can still ask once the PC is back.
 
 ## Keys and identities
 
@@ -80,7 +87,7 @@ so a page left open doesn't keep Neon awake.
 | Prompt injection in the question | "Ignore previous instructions", fake system turns, role-play. | The question sits inside `<question>` delimiters under a system prompt that says it is data. `<`, `>`, newlines and control characters are stripped, so it can't close the delimiter. |
 | Forged conversation history | A client invents earlier assistant turns (many-shot jailbreak). | History is earlier questions only, within the app's `max_history` / `max_history_chars`. Earlier answers are never accepted. |
 | Harmful links or markup in answers | An injected answer carries a phishing link or HTML. | URLs, HTML tags and markdown are stripped. Citations resolve only to documents from the app's own knowledge file, and the client should still render answers as text. |
-| Flooding | Scripts burn GPU time or fill the queue. | Body ≤ 8 KB (413). Input limits (400). Per visitor: per-minute bucket and daily count. Per app: per-minute, daily, and concurrency caps (429 / 503). |
+| Flooding | Scripts burn GPU time or fill the queue. | Body ≤ 8 KB (413). Input limits (400). Per visitor: per-minute bucket and daily counts, one for PC answers and a smaller one for hosted answers. Per app: per-minute, daily, and concurrency caps (429 / 503). |
 | Abandoned jobs | A caller gives up, or the PC is off, and the job runs hours later. | `/apps/ask` cancels its own unclaimed job on timeout or disconnect. Any other caller can do the same with `DELETE /job/{id}`, which only works on the caller's own pending job. |
 | Oversized or poisoned knowledge | A bad deploy of the site serves junk. | Capped at 512 KB, must parse with `version: 1` and unique document ids. On any failure the last good copy is kept. The file comes from the app owner's own site, so its content is trusted. |
 | Status flooding or snooping | Scripts hammer `/apps/status`, or read it to learn when the PC is on. | Answered from the relay's memory, so flooding it costs no database work and doesn't wake Neon. The body is a single boolean and the check time, nothing about load or usage. When the PC is on is already visible to anyone who asks the chat. |

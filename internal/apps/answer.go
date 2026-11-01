@@ -26,6 +26,9 @@ type Answer struct {
 	Citations []Citation `json:"citations"`
 	Refused   bool       `json:"refused"`
 	ServedBy  string     `json:"served_by"`
+	// Remaining is how many more questions this visitor may ask today on the
+	// same path (PC or hosted) that answered this one.
+	Remaining int `json:"remaining"`
 }
 
 var (
