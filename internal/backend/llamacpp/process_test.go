@@ -9,8 +9,10 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -124,6 +126,9 @@ func freePort(t *testing.T) int {
 // sleeperExe returns a harmless executable this test can spawn as a stand-in
 // for llama-server, without requiring the real binary.
 func sleeperExe() string {
+	if runtime.GOOS != "windows" {
+		return "sleep"
+	}
 	if path, err := exec.LookPath("powershell.exe"); err == nil {
 		return path
 	}
@@ -133,14 +138,22 @@ func sleeperExe() string {
 // sleeperArgs returns args that make the stand-in executable sleep long
 // enough for the test to observe it surviving a cancelled caller ctx.
 func sleeperArgs() []string {
+	if runtime.GOOS != "windows" {
+		return []string{"30"}
+	}
 	return []string{"-NoProfile", "-Command", "Start-Sleep -Seconds 30"}
 }
 
-// processAlive reports whether pid is a live OS process. os.FindProcess and
-// Process.Signal are unreliable liveness checks on Windows (FindProcess
-// always succeeds; Signal doesn't support a no-op probe signal), so this
-// shells out to tasklist, which only lists processes that actually exist.
+// processAlive reports whether pid is a live OS process. On Unix, signal 0
+// probes it without touching it. os.FindProcess and Process.Signal are
+// unreliable liveness checks on Windows (FindProcess always succeeds; Signal
+// doesn't support a no-op probe signal), so there this shells out to
+// tasklist, which only lists processes that actually exist.
 func processAlive(pid int) bool {
+	if runtime.GOOS != "windows" {
+		p, err := os.FindProcess(pid)
+		return err == nil && p.Signal(syscall.Signal(0)) == nil
+	}
 	out, err := exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/NH").Output()
 	if err != nil {
 		return false
