@@ -57,15 +57,26 @@ func Enqueue(ctx context.Context, db *sql.DB, job queue.QueueJob) error {
 		VALUES ($1, $2, 'pending', $3, $4, $5)`,
 		job.ID, job.CorrelationID, string(job.Payload), job.MaxAttempts, job.Identity,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	jobsAdded.notify()
+	return nil
 }
 
 // Claim selects the oldest pending job, marks it processing, and returns it.
-// It polls every second up to longPollTimeout. Returns (nil, nil) if no job
-// arrives within the timeout. Runs the visibility-timeout sweep before each poll.
+// If none is pending it waits up to longPollTimeout for Enqueue to add one,
+// without querying the database while it waits, so an idle long-poll costs one
+// check instead of one per second. Returns (nil, nil) if no job arrives within
+// the timeout. Runs the visibility-timeout sweep before each check.
 func Claim(ctx context.Context, db *sql.DB, workerID string, longPollTimeout time.Duration) (*queue.QueueJob, error) {
-	deadline := time.Now().Add(longPollTimeout)
+	timeout := time.NewTimer(longPollTimeout)
+	defer timeout.Stop()
 	for {
+		// Subscribe before checking, so a job enqueued between the check and
+		// the wait below still wakes this call.
+		added := jobsAdded.wait()
+
 		if err := sweepExpired(ctx, db); err != nil {
 			return nil, fmt.Errorf("sweep expired: %w", err)
 		}
@@ -78,14 +89,12 @@ func Claim(ctx context.Context, db *sql.DB, workerID string, longPollTimeout tim
 			return job, nil
 		}
 
-		if time.Now().After(deadline) {
-			return nil, nil
-		}
-
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-time.After(time.Second):
+		case <-timeout.C:
+			return nil, nil
+		case <-added:
 		}
 	}
 }
@@ -158,13 +167,21 @@ func Ack(ctx context.Context, db *sql.DB, req queue.AckRequest) error {
 	if req.ErrorCode != "" {
 		errCode = req.ErrorCode
 	}
-	_, err := db.ExecContext(ctx, `
+	res, err := db.ExecContext(ctx, `
 		UPDATE jobs
 		SET status = $1, result_payload = $2, error_code = $3, finished_at = $4
 		WHERE id = $5 AND status = 'processing'`,
 		string(req.Status), resultPayload, errCode, now, req.JobID,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	// Tell the TTL sweeper a row now has a finished_at to expire. If the row
+	// count is unavailable, record anyway: an extra sweep is harmless.
+	if n, err := res.RowsAffected(); err != nil || n > 0 {
+		finishedJobs.record(now)
+	}
+	return nil
 }
 
 // GetResult returns the current status and (when terminal) the result payload
@@ -217,32 +234,6 @@ func LastClaimAt(ctx context.Context, db *sql.DB) (*time.Time, error) {
 	return &t.Time, nil
 }
 
-// Heartbeat records that workerID polled /claim just now (whether or not it got
-// a job). GET /status uses this to report pc_connected.
-func Heartbeat(ctx context.Context, db *sql.DB, workerID string) error {
-	_, err := db.ExecContext(ctx, `
-		INSERT INTO worker_heartbeat (worker_id, last_poll_at)
-		VALUES ($1, NOW())
-		ON CONFLICT (worker_id) DO UPDATE SET last_poll_at = NOW()`,
-		workerID,
-	)
-	return err
-}
-
-// LastHeartbeat returns the most recent worker poll time across all workers, or
-// nil if none has ever polled.
-func LastHeartbeat(ctx context.Context, db *sql.DB) (*time.Time, error) {
-	var t sql.NullTime
-	if err := db.QueryRowContext(ctx,
-		`SELECT MAX(last_poll_at) FROM worker_heartbeat`).Scan(&t); err != nil {
-		return nil, err
-	}
-	if !t.Valid {
-		return nil, nil
-	}
-	return &t.Time, nil
-}
-
 // PurgeExpired deletes terminal (done/failed) jobs whose finished_at is older
 // than ttl. Returns the number of rows removed.
 func PurgeExpired(ctx context.Context, db *sql.DB, ttl time.Duration) (int64, error) {
@@ -257,6 +248,22 @@ func PurgeExpired(ctx context.Context, db *sql.DB, ttl time.Duration) (int64, er
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+// OldestFinishedAt returns the earliest finished_at among terminal (done or
+// failed) jobs, or nil if there are none. The TTL sweeper uses it to know
+// when its next purge is due.
+func OldestFinishedAt(ctx context.Context, db *sql.DB) (*time.Time, error) {
+	var t sql.NullTime
+	if err := db.QueryRowContext(ctx, `
+		SELECT MIN(finished_at) FROM jobs
+		WHERE status IN ('done', 'failed') AND finished_at IS NOT NULL`).Scan(&t); err != nil {
+		return nil, err
+	}
+	if !t.Valid {
+		return nil, nil
+	}
+	return &t.Time, nil
 }
 
 // IncrementUsage bumps the caller's job count for the current UTC day.

@@ -32,21 +32,22 @@ import (
 // docs/public-apps.md). knowledge loads apps' knowledge files; nil leaves any
 // app with a knowledge_url answering 503 unavailable.
 func New(db *sql.DB, cfg Config, limiter *Limiter, verifier *stackauth.Verifier, knowledge *apps.Registry) http.Handler {
+	pc := &pcPresence{}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/enqueue", handleEnqueue(db, cfg))
-	mux.HandleFunc("/claim", handleClaim(db))
-	mux.HandleFunc("/ack", handleAck(db))
+	mux.HandleFunc("/claim", handleClaim(db, pc))
+	mux.HandleFunc("/ack", handleAck(db, pc))
 	mux.HandleFunc("/result/", handleResult(db))
-	mux.HandleFunc("/status", handleStatus(db))
+	mux.HandleFunc("/status", handleStatus(db, pc))
 	mux.HandleFunc("/members/me", handleMembersMe(db))
 	mux.HandleFunc("DELETE /job/{id}", handleCancel(db))
-	mux.HandleFunc("/apps/ask", handleAsk(cfg, dbAskStore{db}, limiter, func(ctx context.Context, url string) *apps.Index {
+	mux.HandleFunc("/apps/ask", handleAsk(cfg, dbAskStore{db, pc}, limiter, func(ctx context.Context, url string) *apps.Index {
 		if knowledge == nil {
 			return nil
 		}
 		return knowledge.Index(ctx, url)
 	}))
-	mux.HandleFunc("/apps/status", handlePublicStatus(dbAskStore{db}.PCConnected, time.Now))
+	mux.HandleFunc("/apps/status", handlePublicStatus(pc.online, time.Now))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})

@@ -34,6 +34,7 @@ type fakeAskStore struct {
 	jobs      map[string]queue.QueueJob
 	cancelled []string
 	claimed   bool
+	lookups   int
 }
 
 func askSpec(id string) apps.Spec {
@@ -64,6 +65,9 @@ func newFakeAsk(output string) *fakeAskStore {
 }
 
 func (f *fakeAskStore) LookupKey(_ context.Context, key string) (App, error) {
+	f.mu.Lock()
+	f.lookups++
+	f.mu.Unlock()
 	a, ok := f.apps[key]
 	if !ok {
 		return App{}, ErrNotFound
@@ -71,7 +75,7 @@ func (f *fakeAskStore) LookupKey(_ context.Context, key string) (App, error) {
 	return a, nil
 }
 
-func (f *fakeAskStore) PCConnected(context.Context) (bool, error) { return f.connected, nil }
+func (f *fakeAskStore) PCConnected() bool { return f.connected }
 
 func (f *fakeAskStore) UsageToday(_ context.Context, identity string) (int, error) {
 	f.mu.Lock()
@@ -309,6 +313,9 @@ func TestAskAsleepWhenPCOffline(t *testing.T) {
 	}
 	if time.Since(start) > 200*time.Millisecond {
 		t.Fatal("offline reply was not immediate")
+	}
+	if f.lookups != 0 {
+		t.Fatalf("offline ask looked up the key %d times; it must not touch the database", f.lookups)
 	}
 }
 

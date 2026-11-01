@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -69,7 +68,7 @@ func handleEnqueue(db *sql.DB, cfg Config) http.HandlerFunc {
 	}
 }
 
-func handleClaim(db *sql.DB) http.HandlerFunc {
+func handleClaim(db *sql.DB, pc *pcPresence) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req queue.ClaimRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -81,14 +80,9 @@ func handleClaim(db *sql.DB) http.HandlerFunc {
 		ctx, cancel := context.WithTimeout(r.Context(), timeout)
 		defer cancel()
 
-		// Record the poll before the (possibly long) claim so /status reflects a
-		// connected PC even across an idle stretch or a TTL purge of old rows.
-		if req.WorkerID != "" {
-			if err := Heartbeat(ctx, db, req.WorkerID); err != nil {
-				slog.Warn("worker heartbeat failed", "worker_id", req.WorkerID, "err", err)
-			}
-		}
-
+		// Seen before the (possibly long) claim so an idle PC reads as online,
+		// and again after, so a job claimed late in the wait counts from then.
+		pc.seen(time.Now())
 		job, err := Claim(ctx, db, req.WorkerID, time.Duration(queue.LongPollTimeoutSeconds)*time.Second)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -97,14 +91,16 @@ func handleClaim(db *sql.DB) http.HandlerFunc {
 			http.Error(w, "claim failed", http.StatusInternalServerError)
 			return
 		}
+		pc.seen(time.Now())
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(queue.ClaimResponse{Job: job}) //nolint:errcheck
 	}
 }
 
-func handleAck(db *sql.DB) http.HandlerFunc {
+func handleAck(db *sql.DB, pc *pcPresence) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		pc.seen(time.Now())
 		var req queue.AckRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "malformed JSON", http.StatusBadRequest)
@@ -187,14 +183,9 @@ func handleMembersMe(db *sql.DB) http.HandlerFunc {
 	}
 }
 
-func handleStatus(db *sql.DB) http.HandlerFunc {
+func handleStatus(db *sql.DB, pc *pcPresence) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		lastClaim, err := LastClaimAt(r.Context(), db)
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, api.ErrCodeInternal, "status lookup failed")
-			return
-		}
-		lastPoll, err := LastHeartbeat(r.Context(), db)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, api.ErrCodeInternal, "status lookup failed")
 			return
@@ -205,32 +196,9 @@ func handleStatus(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		writeJSON(w, http.StatusOK, queue.QueueStatusResponse{
-			PCConnected:  isConnected(lastPoll, lastClaim),
+			PCConnected:  pc.online(time.Now()),
 			LastClaimAt:  lastClaim,
 			PendingDepth: pending,
 		})
 	}
-}
-
-// isConnected reports whether the PC has polled /claim (heartbeat) or claimed a
-// job within ~2× the long-poll interval — whichever is more recent.
-func isConnected(lastPoll, lastClaim *time.Time) bool {
-	recent := lastPoll
-	if lastClaim != nil && (recent == nil || lastClaim.After(*recent)) {
-		recent = lastClaim
-	}
-	return recent != nil &&
-		time.Since(*recent) < 2*time.Duration(queue.LongPollTimeoutSeconds)*time.Second
-}
-
-func pcConnected(ctx context.Context, db *sql.DB) (bool, error) {
-	lastPoll, err := LastHeartbeat(ctx, db)
-	if err != nil {
-		return false, err
-	}
-	lastClaim, err := LastClaimAt(ctx, db)
-	if err != nil {
-		return false, err
-	}
-	return isConnected(lastPoll, lastClaim), nil
 }

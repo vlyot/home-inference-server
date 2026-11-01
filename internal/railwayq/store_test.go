@@ -416,3 +416,114 @@ func TestPurgeExpiredDeletesOldTerminalRows(t *testing.T) {
 		t.Errorf("remaining rows = %d, want 2 (new-done + old-pend)", remaining)
 	}
 }
+
+func TestClaimWakesWhenAJobIsEnqueued(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	type result struct {
+		job *queue.QueueJob
+		err error
+		at  time.Time
+	}
+	done := make(chan result, 1)
+	go func() {
+		job, err := railwayq.Claim(ctx, db, "worker-1", 20*time.Second)
+		done <- result{job, err, time.Now()}
+	}()
+
+	time.Sleep(300 * time.Millisecond) // let Claim find the queue empty and wait
+	enqueued := time.Now()
+	if err := railwayq.Enqueue(ctx, db, newJob("wake-1")); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	select {
+	case r := <-done:
+		if r.err != nil {
+			t.Fatalf("claim: %v", r.err)
+		}
+		if r.job == nil || r.job.ID != "wake-1" {
+			t.Fatalf("claimed %+v, want wake-1", r.job)
+		}
+		if lag := r.at.Sub(enqueued); lag > time.Second {
+			t.Errorf("claim took %v after the enqueue, want well under 1s", lag)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("claim did not wake on enqueue")
+	}
+}
+
+func TestClaimTimesOutOnSchedule(t *testing.T) {
+	db := openTestDB(t)
+	start := time.Now()
+	job, err := railwayq.Claim(context.Background(), db, "worker-1", 1500*time.Millisecond)
+	if err != nil || job != nil {
+		t.Fatalf("claim = %+v, %v; want nil, nil", job, err)
+	}
+	if took := time.Since(start); took < 1400*time.Millisecond || took > 3*time.Second {
+		t.Errorf("claim returned after %v, want about 1.5s", took)
+	}
+}
+
+func TestOldestFinishedAt(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	got, err := railwayq.OldestFinishedAt(ctx, db)
+	if err != nil || got != nil {
+		t.Fatalf("empty table: got %v, %v; want nil, nil", got, err)
+	}
+
+	db.ExecContext(ctx, `
+		INSERT INTO jobs (id, correlation_id, status, payload, finished_at, attempt_count, max_attempts)
+		VALUES
+		 ('a', 'r1', 'done',       '{}', NOW() - INTERVAL '30 minutes', 1, 3),
+		 ('b', 'r2', 'failed',     '{}', NOW() - INTERVAL '50 minutes', 1, 3),
+		 ('c', 'r3', 'processing', '{}', NOW() - INTERVAL '5 hours',    1, 3),
+		 ('d', 'r4', 'pending',    '{}', NULL,                          0, 3)
+	`) //nolint:errcheck
+
+	got, err = railwayq.OldestFinishedAt(ctx, db)
+	if err != nil || got == nil {
+		t.Fatalf("got %v, %v; want a time", got, err)
+	}
+	if age := time.Since(*got); age < 49*time.Minute || age > 51*time.Minute {
+		t.Errorf("oldest finished is %v old, want about 50m (the failed row)", age)
+	}
+}
+
+func TestTTLSweeperPurgesLeftoverRowsAtStartup(t *testing.T) {
+	db := openTestDB(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	db.ExecContext(ctx, `
+		INSERT INTO jobs (id, correlation_id, status, payload, finished_at, attempt_count, max_attempts)
+		VALUES
+		 ('old-done', 'r1', 'done', '{}', NOW() - INTERVAL '2 hours', 1, 3),
+		 ('new-done', 'r2', 'done', '{}', NOW(),                       1, 3)
+	`) //nolint:errcheck
+
+	go railwayq.StartTTLSweeper(ctx, db, time.Hour)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var n int
+		db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM jobs`).Scan(&n) //nolint:errcheck
+		if n == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("rows = %d after 5s, want 1 (startup purge of old-done)", n)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	var id string
+	db.QueryRowContext(context.Background(), `SELECT id FROM jobs`).Scan(&id) //nolint:errcheck
+	if id != "new-done" {
+		t.Errorf("remaining job = %q, want new-done", id)
+	}
+	cancel()
+	time.Sleep(100 * time.Millisecond) // let the sweeper exit before cleanup
+}

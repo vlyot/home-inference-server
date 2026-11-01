@@ -45,7 +45,7 @@ type AskRequest struct {
 // askStore is the part of the database the ask handler needs.
 type askStore interface {
 	LookupKey(ctx context.Context, key string) (App, error)
-	PCConnected(ctx context.Context) (bool, error)
+	PCConnected() bool
 	UsageToday(ctx context.Context, identity string) (int, error)
 	// Enqueue stores the job and counts it against the identity's daily usage.
 	Enqueue(ctx context.Context, job queue.QueueJob) error
@@ -53,13 +53,16 @@ type askStore interface {
 	CancelPending(ctx context.Context, id, identity string) error
 }
 
-type dbAskStore struct{ db *sql.DB }
+type dbAskStore struct {
+	db *sql.DB
+	pc *pcPresence
+}
 
 func (s dbAskStore) LookupKey(ctx context.Context, key string) (App, error) {
 	return LookupKey(ctx, s.db, key)
 }
 
-func (s dbAskStore) PCConnected(ctx context.Context) (bool, error) { return pcConnected(ctx, s.db) }
+func (s dbAskStore) PCConnected() bool { return s.pc.online(time.Now()) }
 
 func (s dbAskStore) UsageToday(ctx context.Context, identity string) (int, error) {
 	return UsageToday(ctx, s.db, identity)
@@ -214,6 +217,15 @@ func handleAsk(cfg Config, store askStore, limiter *Limiter, knowledge knowledge
 			writeErr(w, http.StatusUnauthorized, api.ErrCodeUnauthorized, "unknown or revoked app key")
 			return
 		}
+		// Checked before anything that queries the database, so a question
+		// while the PC is off doesn't wake it. /apps/status already tells
+		// anyone whether the PC is online, so answering this before the key
+		// check reveals nothing new.
+		if !store.PCConnected() {
+			logAsk(logschema.EventAskAsleep, "", "pc_offline")
+			writeErr(w, http.StatusServiceUnavailable, api.ErrCodeUnavailable, "the server is asleep")
+			return
+		}
 		app, err := store.LookupKey(r.Context(), req.Key)
 		if errors.Is(err, ErrNotFound) {
 			writeErr(w, http.StatusUnauthorized, api.ErrCodeUnauthorized, "unknown or revoked app key")
@@ -261,17 +273,6 @@ func handleAsk(cfg Config, store askStore, limiter *Limiter, knowledge knowledge
 				return
 			}
 		}
-		connected, err := store.PCConnected(r.Context())
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, api.ErrCodeInternal, "status lookup failed")
-			return
-		}
-		if !connected {
-			logAsk(logschema.EventAskAsleep, identity, "pc_offline")
-			writeErr(w, http.StatusServiceUnavailable, api.ErrCodeUnavailable, "the server is asleep")
-			return
-		}
-
 		if !limiter.AllowAt(identity, spec.Limits.PerMin) {
 			logAsk(logschema.EventAskLimited, identity, "app_per_min")
 			writeErr(w, http.StatusTooManyRequests, api.ErrCodeRateLimited, "this app is busy, try again shortly")

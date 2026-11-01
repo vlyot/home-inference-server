@@ -1,25 +1,12 @@
 package railwayq
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 )
-
-type statusCheck struct {
-	online bool
-	err    error
-	calls  int
-}
-
-func (c *statusCheck) check(context.Context) (bool, error) {
-	c.calls++
-	return c.online, c.err
-}
 
 func getPublicStatus(t *testing.T, h http.Handler, method string) *httptest.ResponseRecorder {
 	t.Helper()
@@ -28,42 +15,47 @@ func getPublicStatus(t *testing.T, h http.Handler, method string) *httptest.Resp
 	return rec
 }
 
-func TestPublicStatus_ReportsOnlineFromCheck(t *testing.T) {
-	c := &statusCheck{online: true}
-	rec := getPublicStatus(t, handlePublicStatus(c.check, time.Now), http.MethodGet)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
+func decodePublicStatus(t *testing.T, rec *httptest.ResponseRecorder) PublicStatusResponse {
+	t.Helper()
 	var body PublicStatusResponse
 	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
 		t.Fatal(err)
 	}
-	if !body.Online || body.CheckedAt.IsZero() {
-		t.Fatalf("body = %+v, want online with a check time", body)
-	}
+	return body
 }
 
-func TestPublicStatus_CachesForFifteenSeconds(t *testing.T) {
-	c := &statusCheck{online: false}
+func TestPublicStatus_FollowsThePCsLastRequest(t *testing.T) {
+	pc := &pcPresence{}
 	now := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
-	h := handlePublicStatus(c.check, func() time.Time { return now })
+	h := handlePublicStatus(pc.online, func() time.Time { return now })
 
-	getPublicStatus(t, h, http.MethodGet)
-	now = now.Add(14 * time.Second)
-	getPublicStatus(t, h, http.MethodGet)
-	if c.calls != 1 {
-		t.Fatalf("calls within the TTL = %d, want 1", c.calls)
+	if body := decodePublicStatus(t, getPublicStatus(t, h, http.MethodGet)); body.Online {
+		t.Fatal("online before the PC ever polled")
 	}
-	now = now.Add(time.Second)
-	getPublicStatus(t, h, http.MethodGet)
-	if c.calls != 2 {
-		t.Fatalf("calls after the TTL = %d, want 2", c.calls)
+
+	pc.seen(now)
+	now = now.Add(59 * time.Second)
+	rec := getPublicStatus(t, h, http.MethodGet)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := decodePublicStatus(t, rec)
+	if !body.Online || !body.CheckedAt.Equal(now) {
+		t.Fatalf("body = %+v, want online, checked at %v", body, now)
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "public, max-age=15" {
+		t.Fatalf("Cache-Control = %q", got)
+	}
+
+	now = now.Add(time.Second) // 60 s since the last poll
+	if body := decodePublicStatus(t, getPublicStatus(t, h, http.MethodGet)); body.Online {
+		t.Fatal("still online 60 s after the last poll")
 	}
 }
 
 func TestPublicStatus_NoAuthWildcardCORS(t *testing.T) {
-	c := &statusCheck{online: true}
-	h := identityMiddleware(nil, Config{StaticAPIKey: "secret"}, NewLimiter(60), nil, handlePublicStatus(c.check, time.Now))
+	online := func(time.Time) bool { return true }
+	h := identityMiddleware(nil, Config{StaticAPIKey: "secret"}, NewLimiter(60), nil, handlePublicStatus(online, time.Now))
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/apps/status", nil)
 	req.Header.Set("Origin", "https://vlyot.github.io")
@@ -77,21 +69,10 @@ func TestPublicStatus_NoAuthWildcardCORS(t *testing.T) {
 }
 
 func TestPublicStatus_RejectsNonGET(t *testing.T) {
-	c := &statusCheck{}
-	rec := getPublicStatus(t, handlePublicStatus(c.check, time.Now), http.MethodPost)
-	if rec.Code != http.StatusMethodNotAllowed || c.calls != 0 {
-		t.Fatalf("status = %d, calls = %d; want 405 and no lookup", rec.Code, c.calls)
-	}
-}
-
-func TestPublicStatus_LookupErrorIsNotCached(t *testing.T) {
-	c := &statusCheck{err: errors.New("db down")}
-	h := handlePublicStatus(c.check, time.Now)
-	if rec := getPublicStatus(t, h, http.MethodGet); rec.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want 500", rec.Code)
-	}
-	c.err, c.online = nil, true
-	if rec := getPublicStatus(t, h, http.MethodGet); rec.Code != http.StatusOK || c.calls != 2 {
-		t.Fatalf("status = %d, calls = %d; want a fresh lookup after an error", rec.Code, c.calls)
+	calls := 0
+	online := func(time.Time) bool { calls++; return true }
+	rec := getPublicStatus(t, handlePublicStatus(online, time.Now), http.MethodPost)
+	if rec.Code != http.StatusMethodNotAllowed || calls != 0 {
+		t.Fatalf("status = %d, calls = %d; want 405 and no check", rec.Code, calls)
 	}
 }

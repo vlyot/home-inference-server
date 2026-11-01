@@ -1419,7 +1419,7 @@ const { accessToken } = await user.getAuthJson();</code></pre>
     <tr>
       <td class="field-name">GET /status</td>
       <td class="field-desc">—</td>
-      <td class="field-desc"><code>200 { "pc_connected": bool, "last_claim_at"?: RFC3339, "pending_depth": int }</code>. <code>pc_connected</code> is true when the PC worker has polled <code>/claim</code> (heartbeat, whether or not it got a job) or claimed one within the last ~60&nbsp;s — so a connected-but-idle PC still reads as connected.</td>
+      <td class="field-desc"><code>200 { "pc_connected": bool, "last_claim_at"?: RFC3339, "pending_depth": int }</code>. <code>pc_connected</code> is true when the PC worker has called <code>/claim</code> (whether or not it got a job) or <code>/ack</code> within the last 60&nbsp;s — so a connected-but-idle PC still reads as connected. The relay keeps this in memory, so checking it never wakes the database; right after a relay redeploy it reads <code>false</code> for a few seconds, until the PC's next poll.</td>
     </tr>
     <tr>
       <td class="field-name">DELETE /job/{id}</td>
@@ -1434,7 +1434,7 @@ const { accessToken } = await user.getAuthJson();</code></pre>
     <tr>
       <td class="field-name">GET /apps/status</td>
       <td class="field-desc">No credential. Any origin (<code>Access-Control-Allow-Origin: *</code>).</td>
-      <td class="field-desc"><code>200 { "online": bool, "checked_at": RFC3339 }</code>. <code>online</code> means the same as <code>pc_connected</code> on <code>/status</code>. One lookup answers every request for 15&nbsp;s. <code>405</code> for anything but <code>GET</code>/<code>HEAD</code>.</td>
+      <td class="field-desc"><code>200 { "online": bool, "checked_at": RFC3339 }</code>. <code>online</code> means the same as <code>pc_connected</code> on <code>/status</code>, and is answered from memory without touching the database. Sent with <code>Cache-Control: public, max-age=15</code>. <code>405</code> for anything but <code>GET</code>/<code>HEAD</code>.</td>
     </tr>
     <tr>
       <td class="field-name">GET /members/me</td>
@@ -1505,7 +1505,7 @@ DATABASE_URL=… go run ./cmd/memberadd -list                                   
     <tr><td>401</td><td><code>unauthorized</code></td><td>Unknown or revoked key, or a disabled app.</td></tr>
     <tr><td>403</td><td><code>unauthorized</code></td><td>The request's <code>Origin</code> isn't in the app's <code>origins</code>.</td></tr>
     <tr><td>429</td><td><code>rate_limited</code> / <code>quota_exceeded</code></td><td>The visitor's per-minute or daily limit, or the app's per-minute or daily cap.</td></tr>
-    <tr><td>503</td><td><code>unavailable</code></td><td>Asleep: the PC hasn't polled in the last minute, or the app's knowledge file hasn't loaded. Returned immediately and nothing is queued.</td></tr>
+    <tr><td>503</td><td><code>unavailable</code></td><td>Asleep: the PC hasn't polled in the last minute, or the app's knowledge file hasn't loaded. Returned immediately and nothing is queued. The PC check comes right after the key's format check and before the key is looked up, so while the PC is off a request never reaches the database (and any <code>pk_</code>-shaped key gets this <code>503</code>, not a <code>401</code>).</td></tr>
     <tr><td>503</td><td><code>overloaded</code></td><td>The app's concurrency cap is full, the PC didn't pick the job up within the wait (the job is cancelled), or the model failed.</td></tr>
     <tr><td>504</td><td><code>timeout</code></td><td>The PC picked the job up but didn't finish within the wait.</td></tr>
   </tbody>

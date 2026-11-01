@@ -43,14 +43,9 @@ CREATE TABLE IF NOT EXISTS allowed_members (
 ALTER TABLE allowed_members ADD COLUMN IF NOT EXISTS username TEXT;
 ALTER TABLE allowed_members ADD COLUMN IF NOT EXISTS display_name TEXT;
 
--- worker_heartbeat records the last time the PC worker polled /claim, even when
--- the long-poll returned no job. GET /status derives pc_connected from this, so
--- a connected-but-idle PC (or one whose old job rows were TTL-purged) still
--- reads as connected.
-CREATE TABLE IF NOT EXISTS worker_heartbeat (
-    worker_id    TEXT PRIMARY KEY,
-    last_poll_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
+-- worker_heartbeat used to record each /claim poll. The relay now keeps that in
+-- memory (pcPresence) so status checks don't wake the database.
+DROP TABLE IF EXISTS worker_heartbeat;
 
 -- apps holds one row per public client app; spec is an apps.Spec pushed by
 -- cmd/appadd. app_keys stores only sha256(key): a key is shown once, when

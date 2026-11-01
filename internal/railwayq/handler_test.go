@@ -264,8 +264,19 @@ func TestStatusReportsPCConnected(t *testing.T) {
 		t.Fatalf("expected pc_connected=false with no claims")
 	}
 
-	db.Exec(`INSERT INTO jobs (id, correlation_id, status, payload, claimed_at, attempt_count, max_attempts)
-	         VALUES ('c-recent','r','processing','{}',NOW(),1,3)`) //nolint:errcheck
+	// A pending job makes the PC's /claim return at once instead of long-polling.
+	if err := railwayq.Enqueue(context.Background(), db, queue.QueueJob{ID: "c-recent", CorrelationID: "r",
+		Payload: json.RawMessage(`{}`), MaxAttempts: 3}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/claim", strings.NewReader(`{"worker_id":"pc"}`))
+	req.Header.Set("X-API-Key", cfg.StaticAPIKey)
+	srv.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("claim = %d, want 200", rr.Code)
+	}
+
 	rr = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodGet, "/status", nil)
 	req.Header.Set("X-API-Key", cfg.StaticAPIKey)
@@ -273,6 +284,14 @@ func TestStatusReportsPCConnected(t *testing.T) {
 	json.Unmarshal(rr.Body.Bytes(), &st) //nolint:errcheck
 	if !st.PCConnected {
 		t.Fatalf("expected pc_connected=true after a recent claim")
+	}
+
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/apps/status", nil))
+	var pub railwayq.PublicStatusResponse
+	json.Unmarshal(rr.Body.Bytes(), &pub) //nolint:errcheck
+	if !pub.Online {
+		t.Fatalf("/apps/status online = false after a recent claim")
 	}
 }
 

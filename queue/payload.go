@@ -74,7 +74,7 @@ type ResultResponse struct {
 }
 
 // QueueStatusResponse is the body of GET /status. PCConnected is true when the
-// PC has long-polled within a small multiple of the long-poll timeout.
+// PC has called /claim or /ack within twice the long-poll timeout.
 type QueueStatusResponse struct {
 	PCConnected  bool       `json:"pc_connected"`
 	LastClaimAt  *time.Time `json:"last_claim_at,omitempty"`
