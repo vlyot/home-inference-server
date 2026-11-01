@@ -49,6 +49,8 @@ type askStore interface {
 	UsageToday(ctx context.Context, identity string) (int, error)
 	// Enqueue stores the job and counts it against the identity's daily usage.
 	Enqueue(ctx context.Context, job queue.QueueJob) error
+	// CountUsage counts a question answered without a job (by the hosted model).
+	CountUsage(ctx context.Context, identity string) error
 	Result(ctx context.Context, id, identity string) (queue.ResultResponse, error)
 	CancelPending(ctx context.Context, id, identity string) error
 }
@@ -75,6 +77,10 @@ func (s dbAskStore) Enqueue(ctx context.Context, job queue.QueueJob) error {
 	return IncrementUsage(ctx, s.db, job.Identity)
 }
 
+func (s dbAskStore) CountUsage(ctx context.Context, identity string) error {
+	return IncrementUsage(ctx, s.db, identity)
+}
+
 func (s dbAskStore) Result(ctx context.Context, id, identity string) (queue.ResultResponse, error) {
 	return GetResult(ctx, s.db, id, identity)
 }
@@ -86,6 +92,11 @@ func (s dbAskStore) CancelPending(ctx context.Context, id, identity string) erro
 // knowledgeFunc returns the index for an app's knowledge_url, or nil when
 // none is loaded. *apps.Registry.Index satisfies it.
 type knowledgeFunc func(ctx context.Context, url string) *apps.Index
+
+// hostedModel answers while the PC is offline. *hosted.Client satisfies it.
+type hostedModel interface {
+	Answer(ctx context.Context, req api.InferRequest) (string, error)
+}
 
 // askVisitors rate-limits each app's visitors by hashed client address, per
 // minute and per UTC day, in memory only. Entries from earlier days are
@@ -174,7 +185,9 @@ func visitorKey(r *http.Request, salt, appID string) string {
 // relay builds the whole prompt from that spec; the client only supplies a
 // question. limiter is the relay's per-identity limiter, so an app's
 // questions and its secret-key /enqueue calls share one per-minute budget.
-func handleAsk(cfg Config, store askStore, limiter *Limiter, knowledge knowledgeFunc) http.HandlerFunc {
+// fallback, when non-nil, answers instead of the PC while it's offline; nil
+// means an offline PC is "asleep".
+func handleAsk(cfg Config, store askStore, limiter *Limiter, knowledge knowledgeFunc, fallback hostedModel) http.HandlerFunc {
 	visitors := newAskVisitors()
 	running := &inFlight{n: map[string]int{}}
 
@@ -217,11 +230,13 @@ func handleAsk(cfg Config, store askStore, limiter *Limiter, knowledge knowledge
 			writeErr(w, http.StatusUnauthorized, api.ErrCodeUnauthorized, "unknown or revoked app key")
 			return
 		}
-		// Checked before anything that queries the database, so a question
-		// while the PC is off doesn't wake it. /apps/status already tells
-		// anyone whether the PC is online, so answering this before the key
-		// check reveals nothing new.
-		if !store.PCConnected() {
+		// Without a fallback this is checked before anything that queries the
+		// database, so a question while the PC is off doesn't wake it.
+		// /apps/status already tells anyone whether the PC is online, so
+		// answering this before the key check reveals nothing new. With a
+		// fallback, an offline question does wake it, for the key and usage.
+		pcOnline := store.PCConnected()
+		if !pcOnline && fallback == nil {
 			logAsk(logschema.EventAskAsleep, "", "pc_offline")
 			writeErr(w, http.StatusServiceUnavailable, api.ErrCodeUnavailable, "the server is asleep")
 			return
@@ -300,7 +315,12 @@ func handleAsk(cfg Config, store askStore, limiter *Limiter, knowledge knowledge
 		if idx != nil {
 			sources = idx.Retrieve(req.Input, req.History, spec.IgnoreTerms)
 		}
-		payload, err := json.Marshal(apps.BuildRequest(spec, sources, req.Input, req.History))
+		infer := apps.BuildRequest(spec, sources, req.Input, req.History)
+		if !pcOnline {
+			answerHosted(w, r, store, fallback, infer, sources, spec, identity, utf8.RuneCountInString(req.Input))
+			return
+		}
+		payload, err := json.Marshal(infer)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, api.ErrCodeInternal, "request build failed")
 			return
@@ -339,20 +359,53 @@ func handleAsk(cfg Config, store askStore, limiter *Limiter, knowledge knowledge
 			return
 		}
 		answer := apps.Clean(out.Output, sources, spec)
-		event := logschema.EventAskAnswered
-		if answer.Refused {
-			event = logschema.EventAskRefused
-		}
-		// Questions are never logged, only their length.
-		slog.Info("app ask",
-			slog.String(logschema.FieldEvent, string(event)),
-			slog.String(logschema.FieldIdentity, identity),
-			slog.Int(logschema.FieldCount, utf8.RuneCountInString(req.Input)),
-			slog.Int64(logschema.FieldDurationMS, time.Since(start).Milliseconds()),
-			slog.String(logschema.FieldModelTier, out.ModelTier),
-		)
+		answer.ServedBy = apps.ServedByPC
+		logAnswer(identity, answer, utf8.RuneCountInString(req.Input), time.Since(start), out.ModelTier)
 		writeJSON(w, http.StatusOK, answer)
 	}
+}
+
+// answerHosted answers with the hosted model in one attempt, within the
+// spec's wait. Any failure is "unavailable", which client apps already treat
+// as "fall back to offline search for a while".
+func answerHosted(w http.ResponseWriter, r *http.Request, store askStore, model hostedModel, infer api.InferRequest, sources []apps.Doc, spec apps.Spec, identity string, inputRunes int) {
+	if err := store.CountUsage(r.Context(), identity); err != nil {
+		writeErr(w, http.StatusInternalServerError, api.ErrCodeInternal, "usage check failed")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(spec.Limits.WaitSeconds)*time.Second)
+	defer cancel()
+	start := time.Now()
+	output, err := model.Answer(ctx, infer)
+	if err != nil {
+		if r.Context().Err() != nil {
+			return
+		}
+		slog.Warn("hosted model failed", slog.String(logschema.FieldIdentity, identity), slog.String("err", err.Error()))
+		logAsk(logschema.EventAskFailed, identity, "hosted_error")
+		writeErr(w, http.StatusServiceUnavailable, api.ErrCodeUnavailable, "the chat couldn't answer right now")
+		return
+	}
+	answer := apps.Clean(output, sources, spec)
+	answer.ServedBy = apps.ServedByHosted
+	logAnswer(identity, answer, inputRunes, time.Since(start), apps.ServedByHosted)
+	writeJSON(w, http.StatusOK, answer)
+}
+
+// logAnswer records an answered question. Questions are never logged, only
+// their length.
+func logAnswer(identity string, answer apps.Answer, inputRunes int, took time.Duration, tier string) {
+	event := logschema.EventAskAnswered
+	if answer.Refused {
+		event = logschema.EventAskRefused
+	}
+	slog.Info("app ask",
+		slog.String(logschema.FieldEvent, string(event)),
+		slog.String(logschema.FieldIdentity, identity),
+		slog.Int(logschema.FieldCount, inputRunes),
+		slog.Int64(logschema.FieldDurationMS, took.Milliseconds()),
+		slog.String(logschema.FieldModelTier, tier),
+	)
 }
 
 func validateAsk(req *AskRequest, l apps.Limits) string {

@@ -9,6 +9,7 @@ import (
 	"github.com/ngkaichong/home-inference-server/assets"
 	"github.com/ngkaichong/home-inference-server/internal/apps"
 	"github.com/ngkaichong/home-inference-server/internal/dashboard"
+	"github.com/ngkaichong/home-inference-server/internal/hosted"
 	"github.com/ngkaichong/home-inference-server/internal/stackauth"
 )
 
@@ -30,9 +31,15 @@ import (
 // /apps/ask is the public route for browser-only apps: a publishable key
 // selects the app's server-side spec and the relay builds the prompt (see
 // docs/public-apps.md). knowledge loads apps' knowledge files; nil leaves any
-// app with a knowledge_url answering 503 unavailable.
-func New(db *sql.DB, cfg Config, limiter *Limiter, verifier *stackauth.Verifier, knowledge *apps.Registry) http.Handler {
+// app with a knowledge_url answering 503 unavailable. fallback, when non-nil,
+// answers /apps/ask while the PC is offline.
+func New(db *sql.DB, cfg Config, limiter *Limiter, verifier *stackauth.Verifier, knowledge *apps.Registry, fallback *hosted.Client) http.Handler {
 	pc := &pcPresence{}
+	// A nil *hosted.Client inside the interface would not compare equal to nil.
+	var model hostedModel
+	if fallback != nil {
+		model = fallback
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/enqueue", handleEnqueue(db, cfg))
 	mux.HandleFunc("/claim", handleClaim(db, pc))
@@ -46,8 +53,8 @@ func New(db *sql.DB, cfg Config, limiter *Limiter, verifier *stackauth.Verifier,
 			return nil
 		}
 		return knowledge.Index(ctx, url)
-	}))
-	mux.HandleFunc("/apps/status", handlePublicStatus(pc.online, time.Now))
+	}, model))
+	mux.HandleFunc("/apps/status", handlePublicStatus(pc.online, model != nil, time.Now))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})

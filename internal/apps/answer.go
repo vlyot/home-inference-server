@@ -13,11 +13,19 @@ type Citation struct {
 	Link  string `json:"link,omitempty"`
 }
 
+// Where an answer came from: the home PC, or the hosted model that covers
+// for it while it's offline.
+const (
+	ServedByPC     = "pc"
+	ServedByHosted = "hosted"
+)
+
 // Answer is the body of a successful POST /apps/ask.
 type Answer struct {
 	Text      string     `json:"answer"`
 	Citations []Citation `json:"citations"`
 	Refused   bool       `json:"refused"`
+	ServedBy  string     `json:"served_by"`
 }
 
 var (

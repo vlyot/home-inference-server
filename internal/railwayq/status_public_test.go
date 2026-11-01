@@ -27,7 +27,7 @@ func decodePublicStatus(t *testing.T, rec *httptest.ResponseRecorder) PublicStat
 func TestPublicStatus_FollowsThePCsLastRequest(t *testing.T) {
 	pc := &pcPresence{}
 	now := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
-	h := handlePublicStatus(pc.online, func() time.Time { return now })
+	h := handlePublicStatus(pc.online, false, func() time.Time { return now })
 
 	if body := decodePublicStatus(t, getPublicStatus(t, h, http.MethodGet)); body.Online {
 		t.Fatal("online before the PC ever polled")
@@ -55,7 +55,7 @@ func TestPublicStatus_FollowsThePCsLastRequest(t *testing.T) {
 
 func TestPublicStatus_NoAuthWildcardCORS(t *testing.T) {
 	online := func(time.Time) bool { return true }
-	h := identityMiddleware(nil, Config{StaticAPIKey: "secret"}, NewLimiter(60), nil, handlePublicStatus(online, time.Now))
+	h := identityMiddleware(nil, Config{StaticAPIKey: "secret"}, NewLimiter(60), nil, handlePublicStatus(online, false, time.Now))
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/apps/status", nil)
 	req.Header.Set("Origin", "https://vlyot.github.io")
@@ -68,10 +68,20 @@ func TestPublicStatus_NoAuthWildcardCORS(t *testing.T) {
 	}
 }
 
+func TestPublicStatus_ReportsFallback(t *testing.T) {
+	online := func(time.Time) bool { return false }
+	for _, fallback := range []bool{false, true} {
+		body := decodePublicStatus(t, getPublicStatus(t, handlePublicStatus(online, fallback, time.Now), http.MethodGet))
+		if body.Fallback != fallback || body.Online {
+			t.Errorf("fallback %v: body = %+v", fallback, body)
+		}
+	}
+}
+
 func TestPublicStatus_RejectsNonGET(t *testing.T) {
 	calls := 0
 	online := func(time.Time) bool { calls++; return true }
-	rec := getPublicStatus(t, handlePublicStatus(online, time.Now), http.MethodPost)
+	rec := getPublicStatus(t, handlePublicStatus(online, false, time.Now), http.MethodPost)
 	if rec.Code != http.StatusMethodNotAllowed || calls != 0 {
 		t.Fatalf("status = %d, calls = %d; want 405 and no check", rec.Code, calls)
 	}

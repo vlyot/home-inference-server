@@ -3,6 +3,8 @@ package railwayq
 import (
 	"testing"
 	"time"
+
+	"github.com/ngkaichong/home-inference-server/internal/hosted"
 )
 
 func TestLoadConfigDefaults(t *testing.T) {
@@ -35,6 +37,25 @@ func TestLoadConfigDefaults(t *testing.T) {
 	}
 	if cfg.StaticAPIKey != "static-key" {
 		t.Errorf("StaticAPIKey = %q", cfg.StaticAPIKey)
+	}
+}
+
+func TestLoadConfigHosted(t *testing.T) {
+	t.Setenv("QUEUE_API_KEY", "static-key")
+	t.Setenv("OPENROUTER_API_KEY", "")
+	t.Setenv("HOSTED_MODEL", "")
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.OpenRouterKey != "" || cfg.HostedModel != hosted.DefaultModel {
+		t.Errorf("defaults: key %q model %q, want no key and %s", cfg.OpenRouterKey, cfg.HostedModel, hosted.DefaultModel)
+	}
+
+	t.Setenv("OPENROUTER_API_KEY", "sk-or-x")
+	t.Setenv("HOSTED_MODEL", "google/gemma-4-31b-it:free")
+	if cfg, _ = LoadConfig(); cfg.OpenRouterKey != "sk-or-x" || cfg.HostedModel != "google/gemma-4-31b-it:free" {
+		t.Errorf("set: key %q model %q", cfg.OpenRouterKey, cfg.HostedModel)
 	}
 }
 

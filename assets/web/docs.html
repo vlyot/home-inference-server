@@ -1429,12 +1429,12 @@ const { accessToken } = await user.getAuthJson();</code></pre>
     <tr>
       <td class="field-name">POST /apps/ask</td>
       <td class="field-desc">No relay credential — see <a href="#public-apps">Public apps</a>.</td>
-      <td class="field-desc"><code>200 { "answer", "citations", "refused" }</code></td>
+      <td class="field-desc"><code>200 { "answer", "citations", "refused", "served_by" }</code></td>
     </tr>
     <tr>
       <td class="field-name">GET /apps/status</td>
       <td class="field-desc">No credential. Any origin (<code>Access-Control-Allow-Origin: *</code>).</td>
-      <td class="field-desc"><code>200 { "online": bool, "checked_at": RFC3339 }</code>. <code>online</code> means the same as <code>pc_connected</code> on <code>/status</code>, and is answered from memory without touching the database. Sent with <code>Cache-Control: public, max-age=15</code>. <code>405</code> for anything but <code>GET</code>/<code>HEAD</code>.</td>
+      <td class="field-desc"><code>200 { "online": bool, "fallback": bool, "checked_at": RFC3339 }</code>. <code>online</code> means the same as <code>pc_connected</code> on <code>/status</code>, and is answered from memory without touching the database. <code>fallback</code> is whether a hosted model answers <code>/apps/ask</code> while the PC is offline (fixed at boot). Sent with <code>Cache-Control: public, max-age=15</code>. <code>405</code> for anything but <code>GET</code>/<code>HEAD</code>.</td>
     </tr>
     <tr>
       <td class="field-name">GET /members/me</td>
@@ -1494,7 +1494,8 @@ DATABASE_URL=… go run ./cmd/memberadd -list                                   
     history: ["Tell me about the home inference server"],   // earlier questions only, optional
   }),
 });
-// 200 -> { "answer": "Kai built … [2].", "citations": [{ "n": 2, "title": "…", "link": "/projects/…" }], "refused": false }</code></pre>
+// 200 -> { "answer": "Kai built … [2].", "citations": [{ "n": 2, "title": "…", "link": "/projects/…" }], "refused": false, "served_by": "pc" }</code></pre>
+<p><strong>While the PC is offline.</strong> When the relay has <code>OPENROUTER_API_KEY</code> set, a question that arrives while the PC is offline goes through every check below, then the same built request is sent once to a hosted model (<code>HOSTED_MODEL</code>, default <code>nvidia/nemotron-3-ultra-550b-a55b:free</code>) through OpenRouter, with reasoning off and the spec's token cap, bounded by <code>wait_seconds</code>. The reply is cleaned and citation-checked like the PC's, counts against the app's daily cap, and comes back with <code>"served_by": "hosted"</code>. There is no retry and no second model: any failure is a <code>503 unavailable</code>. Questions answered this way leave Kai's hardware for OpenRouter and the model's provider, whose free tiers may log prompts.</p>
 <p>Unknown body fields are rejected (<code>400</code>), so there is no way to send a prompt, system prompt, message list, tier or token count. Responses:</p>
 <div class="table-wrap">
 <table>
@@ -1505,7 +1506,7 @@ DATABASE_URL=… go run ./cmd/memberadd -list                                   
     <tr><td>401</td><td><code>unauthorized</code></td><td>Unknown or revoked key, or a disabled app.</td></tr>
     <tr><td>403</td><td><code>unauthorized</code></td><td>The request's <code>Origin</code> isn't in the app's <code>origins</code>.</td></tr>
     <tr><td>429</td><td><code>rate_limited</code> / <code>quota_exceeded</code></td><td>The visitor's per-minute or daily limit, or the app's per-minute or daily cap.</td></tr>
-    <tr><td>503</td><td><code>unavailable</code></td><td>Asleep: the PC hasn't polled in the last minute, or the app's knowledge file hasn't loaded. Returned immediately and nothing is queued. The PC check comes right after the key's format check and before the key is looked up, so while the PC is off a request never reaches the database (and any <code>pk_</code>-shaped key gets this <code>503</code>, not a <code>401</code>).</td></tr>
+    <tr><td>503</td><td><code>unavailable</code></td><td>Asleep: the PC hasn't polled in the last minute and the relay has no hosted model, or the app's knowledge file hasn't loaded. Returned immediately and nothing is queued. Without a hosted model, the PC check comes right after the key's format check and before the key is looked up, so while the PC is off a request never reaches the database (and any <code>pk_</code>-shaped key gets this <code>503</code>, not a <code>401</code>). With one, it also means the hosted model failed (rate-limited, upstream error, timeout or empty reply).</td></tr>
     <tr><td>503</td><td><code>overloaded</code></td><td>The app's concurrency cap is full, the PC didn't pick the job up within the wait (the job is cancelled), or the model failed.</td></tr>
     <tr><td>504</td><td><code>timeout</code></td><td>The PC picked the job up but didn't finish within the wait.</td></tr>
   </tbody>

@@ -15,10 +15,11 @@ https://vlyot.github.io/portfolio/.
 2. The relay resolves the key to its app (unknown, revoked or disabled → 401), checks
    the `Origin` against the app's `origins` (403 otherwise), and checks the input
    against the app's size limits.
-3. Per-visitor limits (hashed IP, per app), then knowledge loaded and the PC worker
-   polling `/claim` in the last minute (otherwise an immediate 503 `unavailable`, and
-   nothing is queued), then the app's per-minute budget, concurrency cap and daily
-   cap.
+3. Whether the PC worker polled `/claim` in the last minute. If it didn't and the
+   relay has no hosted model (`OPENROUTER_API_KEY` unset), the reply is an immediate
+   503 `unavailable`, before any database query, and nothing is queued. Then
+   per-visitor limits (hashed IP, per app), knowledge loaded, the app's per-minute
+   budget, concurrency cap and daily cap.
 4. If the app has a `knowledge_url`, its documents are ranked against the question and
    earlier questions (BM25, `always` documents first, about 6,000 characters).
 5. The relay builds the `InferRequest`: the app's pinned system prompt, a fixed safety
@@ -29,7 +30,22 @@ https://vlyot.github.io/portfolio/.
 6. It waits up to `wait_seconds` for the PC. A job still pending at that point, or
    when the visitor disconnects, is deleted so it never runs later.
 7. The answer is cleaned (markup and URLs removed, citations checked) and returned as
-   `{ answer, citations: [{ n, title, link }], refused }`.
+   `{ answer, citations: [{ n, title, link }], refused, served_by: "pc" }`.
+
+### While the PC is offline
+
+With `OPENROUTER_API_KEY` set, an offline PC doesn't mean asleep. After the same
+checks (steps 2–4), the same built request goes to the hosted model (`HOSTED_MODEL`,
+default `nvidia/nemotron-3-ultra-550b-a55b:free`) through OpenRouter's chat
+completions API: the system prompt as a system message, the framed question as the
+user message, with the spec's `max_output_tokens`, temperature 0.2 and reasoning
+off. The question counts against the app's daily `usage` row like a queued one.
+
+There is one attempt, bounded by `wait_seconds`, and no second model. Any failure
+(an OpenRouter 429 when the shared free limit is spent, an upstream error, a timeout,
+an empty reply) is a 503 `unavailable`, which client apps already treat as "fall
+back to offline search for a while". The reply goes through the same cleaning and
+citation check, and comes back with `served_by: "hosted"` so the app can say so.
 
 ## Keys and identities
 
@@ -48,8 +64,9 @@ switch off every key at once.
 ## Public status
 
 `GET /apps/status` needs no key and allows any origin. It returns only
-`{ online, checked_at }`, so a site can say whether its chat has a model behind it
-before a visitor asks. Queue depth and poll times stay on the member-only `/status`.
+`{ online, fallback, checked_at }`, so a site can say whether its chat has a model
+behind it before a visitor asks. `fallback` is whether a hosted model answers while
+the PC is offline; it is fixed when the relay boots. Queue depth and poll times stay on the member-only `/status`.
 The answer comes from the relay's memory of the PC's last poll, never the database,
 so a page left open doesn't keep Neon awake.
 
@@ -67,6 +84,8 @@ so a page left open doesn't keep Neon awake.
 | Abandoned jobs | A caller gives up, or the PC is off, and the job runs hours later. | `/apps/ask` cancels its own unclaimed job on timeout or disconnect. Any other caller can do the same with `DELETE /job/{id}`, which only works on the caller's own pending job. |
 | Oversized or poisoned knowledge | A bad deploy of the site serves junk. | Capped at 512 KB, must parse with `version: 1` and unique document ids. On any failure the last good copy is kept. The file comes from the app owner's own site, so its content is trusted. |
 | Status flooding or snooping | Scripts hammer `/apps/status`, or read it to learn when the PC is on. | Answered from the relay's memory, so flooding it costs no database work and doesn't wake Neon. The body is a single boolean and the check time, nothing about load or usage. When the PC is on is already visible to anyone who asks the chat. |
+| Questions sent to a third party | While the PC is offline, questions leave Kai's own hardware. | They go to OpenRouter and the model's provider, whose free tiers may log prompts. The request carries only the built prompt (spec, sources, framed question), no visitor address or id. The answer is labelled `served_by: "hosted"`, and with no key set nothing is ever sent. |
+| Burning the hosted quota | Scripts spend the OpenRouter free allowance (50 requests a day without credits). | The same per-visitor and per-app limits apply before any hosted call, and an exhausted quota is just another 503 `unavailable`: the site falls back to offline search. |
 | Visitor tracking | The relay stores who asked what. | The visitor key is `sha256(APP_IP_SALT + ip)`, kept in memory only. The job row is purged by the result TTL. Only a question's length is logged, never its text. |
 | Spoofed client address | A caller rotates `X-Forwarded-For` to dodge per-visitor limits. | The key uses `X-Real-IP`, which Railway's edge sets itself. The per-app caps bound the damage if it were ever bypassed. |
 
@@ -80,4 +99,6 @@ so a page left open doesn't keep Neon awake.
 | Knowledge format | `{ version: 1, documents: [{ id, title, link, text, always }] }` | Generic. Each site writes its own text: the profile becomes an `always` document, and words like "flagship" go into a document's text rather than into relay code. |
 | Answers without citations | Replaced by the app's `refusal` when `require_citations` is set | The clearest machine-checkable sign the answer left the supplied content. |
 | Plain prompt, not chat messages | `text_input.prompt` on `min_tier: mid` by default | Through the chat template Gemma 4 "thinks" and spent a 400-token budget before answering. The plain completion path answers directly. `reasoning: "off"` also covers a spec that drops to the weak tier, which forces the template. |
+| PC offline | One hosted model (Nemotron 3 Ultra, free on OpenRouter), one attempt, no backup | It held every rule in a 12-prompt injection check against the portfolio's real prompt. The free Gemma 4 models sit in Google's shared pool and returned 429 on every try. A second model or retries would only spend the shared free quota faster; failing to offline search is already graceful. |
+| Hosted path and Neon | An offline question wakes the database (key lookup and usage count) | Without a fallback the offline check still comes first, so an offline PC costs no database work. With one, a question is real work worth a wake-up; Neon scales back to zero a few minutes later. |
 | Visitor limits store | In memory | No visitor data in Postgres. A redeploy resets per-visitor counts. The per-app daily count is a `usage` row, so it survives restarts. |

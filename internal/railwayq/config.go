@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/ngkaichong/home-inference-server/internal/hosted"
 )
 
 // NormalizeDSN appends sslmode=require to a Postgres DSN that does not already
@@ -47,6 +49,11 @@ type Config struct {
 	// AppIPSalt keys the hashed visitor address /apps/ask rate-limits by.
 	// Unset means a random salt per boot.
 	AppIPSalt string
+
+	// OpenRouterKey enables the hosted model that answers /apps/ask while the
+	// PC is offline. Empty keeps the old behaviour: offline means asleep.
+	OpenRouterKey string
+	HostedModel   string
 }
 
 // LoadConfig reads relay configuration from the environment, applying defaults.
@@ -63,9 +70,14 @@ func LoadConfig() (Config, error) {
 		StackProjectID:  os.Getenv("STACK_PROJECT_ID"),
 		StaticAPIKey:    os.Getenv("QUEUE_API_KEY"),
 		AppIPSalt:       os.Getenv("APP_IP_SALT"),
+		OpenRouterKey:   os.Getenv("OPENROUTER_API_KEY"),
+		HostedModel:     os.Getenv("HOSTED_MODEL"),
 	}
 	if cfg.AppIPSalt == "" {
 		cfg.AppIPSalt = uuid.New().String()
+	}
+	if cfg.HostedModel == "" {
+		cfg.HostedModel = hosted.DefaultModel
 	}
 
 	if cfg.StackJWKSURL != "" && cfg.StackProjectID == "" {

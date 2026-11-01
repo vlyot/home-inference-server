@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ngkaichong/home-inference-server/internal/apps"
+	"github.com/ngkaichong/home-inference-server/internal/hosted"
 	"github.com/ngkaichong/home-inference-server/internal/railwayq"
 	"github.com/ngkaichong/home-inference-server/internal/stackauth"
 )
@@ -54,9 +55,14 @@ func main() {
 		verifier = stackauth.New(cfg.StackJWKSURL, cfg.StackProjectID)
 	}
 
+	fallback := hosted.New(cfg.OpenRouterKey, cfg.HostedModel)
+	if fallback != nil {
+		slog.Info("hosted fallback enabled", "model", fallback.Model())
+	}
+
 	httpServer := &http.Server{
 		Addr:    fmt.Sprintf(":%s", port),
-		Handler: railwayq.New(db, cfg, limiter, verifier, apps.NewRegistry(ctx, 10*time.Minute)),
+		Handler: railwayq.New(db, cfg, limiter, verifier, apps.NewRegistry(ctx, 10*time.Minute), fallback),
 	}
 
 	go func() {

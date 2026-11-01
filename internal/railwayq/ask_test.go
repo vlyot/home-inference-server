@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -91,6 +92,13 @@ func (f *fakeAskStore) Enqueue(_ context.Context, job queue.QueueJob) error {
 	return nil
 }
 
+func (f *fakeAskStore) CountUsage(_ context.Context, identity string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.used[identity]++
+	return nil
+}
+
 func (f *fakeAskStore) Result(_ context.Context, id, identity string) (queue.ResultResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -137,7 +145,7 @@ func testKnowledge() knowledgeFunc {
 }
 
 func askHandler(f *fakeAskStore) http.Handler {
-	return handleAsk(Config{AppIPSalt: "salt"}, f, NewLimiter(10), testKnowledge())
+	return handleAsk(Config{AppIPSalt: "salt"}, f, NewLimiter(10), testKnowledge(), nil)
 }
 
 func askPost(t *testing.T, h http.Handler, body string, mod func(*http.Request)) *httptest.ResponseRecorder {
@@ -280,7 +288,7 @@ func TestAskAppPerMinuteSharesRelayLimiter(t *testing.T) {
 	f.setLimits(askKey, func(l *apps.Limits) { l.PerMin = 1 })
 	limiter := NewLimiter(10)
 	limiter.AllowAt("app:portfolio", 1) // a secret-key /enqueue spent the budget
-	rr := askPost(t, handleAsk(Config{AppIPSalt: "salt"}, f, limiter, testKnowledge()), question, nil)
+	rr := askPost(t, handleAsk(Config{AppIPSalt: "salt"}, f, limiter, testKnowledge(), nil), question, nil)
 	if rr.Code != http.StatusTooManyRequests || errCode(t, rr) != api.ErrCodeRateLimited {
 		t.Fatalf("app over per-minute budget = %d %s, want 429 rate_limited", rr.Code, errCode(t, rr))
 	}
@@ -321,7 +329,7 @@ func TestAskAsleepWhenPCOffline(t *testing.T) {
 
 func TestAskAsleepWithoutKnowledge(t *testing.T) {
 	f := newFakeAsk("Kai built GrabMaps [2].")
-	h := handleAsk(Config{AppIPSalt: "salt"}, f, NewLimiter(10), func(context.Context, string) *apps.Index { return nil })
+	h := handleAsk(Config{AppIPSalt: "salt"}, f, NewLimiter(10), func(context.Context, string) *apps.Index { return nil }, nil)
 	rr := askPost(t, h, question, nil)
 	if rr.Code != http.StatusServiceUnavailable || errCode(t, rr) != api.ErrCodeUnavailable || len(f.jobs) != 0 {
 		t.Fatalf("no knowledge = %d %s with %d jobs", rr.Code, errCode(t, rr), len(f.jobs))
@@ -403,8 +411,114 @@ func TestAskRefusesUncitedAnswer(t *testing.T) {
 	}
 }
 
+// fakeHosted replies with output, or fails with err.
+type fakeHosted struct {
+	output string
+	err    error
+	calls  int
+	got    api.InferRequest
+}
+
+func (h *fakeHosted) Answer(_ context.Context, req api.InferRequest) (string, error) {
+	h.calls++
+	h.got = req
+	return h.output, h.err
+}
+
+func hostedAsk(f *fakeAskStore, model *fakeHosted) http.Handler {
+	f.connected = false
+	return handleAsk(Config{AppIPSalt: "salt"}, f, NewLimiter(10), testKnowledge(), model)
+}
+
+func decodeAnswer(t *testing.T, rr *httptest.ResponseRecorder) apps.Answer {
+	t.Helper()
+	var a apps.Answer
+	if err := json.Unmarshal(rr.Body.Bytes(), &a); err != nil {
+		t.Fatalf("answer body %q: %v", rr.Body.String(), err)
+	}
+	return a
+}
+
+func TestAskHostedWhenPCOffline(t *testing.T) {
+	f := newFakeAsk("")
+	model := &fakeHosted{output: "Kai built GrabMaps [2]."}
+	rr := askPost(t, hostedAsk(f, model), question, nil)
+	a := decodeAnswer(t, rr)
+	if rr.Code != http.StatusOK || a.ServedBy != apps.ServedByHosted || a.Refused || len(a.Citations) != 1 {
+		t.Fatalf("hosted = %d %+v", rr.Code, a)
+	}
+	if len(f.jobs) != 0 || f.used["app:portfolio"] != 1 {
+		t.Fatalf("jobs %d, usage %d; want no job and one counted question", len(f.jobs), f.used["app:portfolio"])
+	}
+	if !strings.Contains(model.got.SystemPrompt, "[2] GrabMaps") || !strings.Contains(model.got.TextInput.Prompt, "<question>") {
+		t.Fatalf("hosted request not built from the spec: %+v", model.got)
+	}
+}
+
+func TestAskPCOnlineSkipsHosted(t *testing.T) {
+	f := newFakeAsk("Kai built GrabMaps [2].")
+	model := &fakeHosted{output: "hosted"}
+	rr := askPost(t, handleAsk(Config{AppIPSalt: "salt"}, f, NewLimiter(10), testKnowledge(), model), question, nil)
+	if a := decodeAnswer(t, rr); rr.Code != http.StatusOK || a.ServedBy != apps.ServedByPC || model.calls != 0 {
+		t.Fatalf("online = %d %+v, hosted calls %d", rr.Code, a, model.calls)
+	}
+}
+
+func TestAskHostedFailureIsUnavailable(t *testing.T) {
+	model := &fakeHosted{err: errors.New("hosted: status 429")}
+	rr := askPost(t, hostedAsk(newFakeAsk(""), model), question, nil)
+	if rr.Code != http.StatusServiceUnavailable || errCode(t, rr) != api.ErrCodeUnavailable || model.calls != 1 {
+		t.Fatalf("hosted failure = %d %s after %d calls, want one 503 unavailable", rr.Code, errCode(t, rr), model.calls)
+	}
+}
+
+func TestAskHostedRequiresCitations(t *testing.T) {
+	rr := askPost(t, hostedAsk(newFakeAsk(""), &fakeHosted{output: "Sure! A poem about cats."}), question, nil)
+	if a := decodeAnswer(t, rr); !a.Refused || a.Text != "That isn't covered in Kai's portfolio." || a.ServedBy != apps.ServedByHosted {
+		t.Fatalf("uncited hosted = %+v", a)
+	}
+}
+
+func TestAskHostedCountsAppUsage(t *testing.T) {
+	f := newFakeAsk("")
+	f.setLimits(askKey, func(l *apps.Limits) { l.PerDay = 1 })
+	model := &fakeHosted{output: "Kai built GrabMaps [2]."}
+	h := hostedAsk(f, model)
+	askPost(t, h, question, nil)
+	rr := askPost(t, h, question, nil)
+	if rr.Code != http.StatusTooManyRequests || errCode(t, rr) != api.ErrCodeQuotaExceeded || model.calls != 1 {
+		t.Fatalf("over app cap = %d %s after %d calls", rr.Code, errCode(t, rr), model.calls)
+	}
+}
+
+func TestAskHostedVisitorDailyLimit(t *testing.T) {
+	f := newFakeAsk("")
+	f.setLimits(askKey, func(l *apps.Limits) { l.VisitorPerDay = 5 })
+	model := &fakeHosted{output: "Kai built GrabMaps [2]."}
+	h := hostedAsk(f, model)
+	for i := 0; i < 5; i++ {
+		if rr := askPost(t, h, question, nil); rr.Code != http.StatusOK {
+			t.Fatalf("question %d = %d, want 200", i+1, rr.Code)
+		}
+	}
+	rr := askPost(t, h, question, nil)
+	if rr.Code != http.StatusTooManyRequests || errCode(t, rr) != api.ErrCodeQuotaExceeded || model.calls != 5 {
+		t.Fatalf("6th question = %d %s after %d calls, want 429 quota_exceeded", rr.Code, errCode(t, rr), model.calls)
+	}
+}
+
+func TestAskHostedChecksOriginFirst(t *testing.T) {
+	model := &fakeHosted{output: "Kai built GrabMaps [2]."}
+	rr := askPost(t, hostedAsk(newFakeAsk(""), model), question, func(r *http.Request) {
+		r.Header.Set("Origin", "https://evil.test")
+	})
+	if rr.Code != http.StatusForbidden || model.calls != 0 {
+		t.Fatalf("foreign origin = %d after %d hosted calls", rr.Code, model.calls)
+	}
+}
+
 func TestAskRouteNeedsNoRelayCredential(t *testing.T) {
-	srv := New(nil, Config{StaticAPIKey: "key", AppIPSalt: "salt"}, NewLimiter(10), nil, nil)
+	srv := New(nil, Config{StaticAPIKey: "key", AppIPSalt: "salt"}, NewLimiter(10), nil, nil, nil)
 
 	rr := httptest.NewRecorder()
 	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/apps/ask", bytes.NewReader([]byte(`{"key":"not-an-app-key","input":"hi"}`))))
