@@ -2,6 +2,7 @@ package llamacpp
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -90,7 +92,9 @@ func (p *process) spawnArgs() []string {
 		"--ctx-size", strconv.Itoa(ctxSizeValue()),
 		"--parallel", strconv.Itoa(p.parallel),
 		"--cont-batching",
-		"--no-mmap",
+	}
+	args = append(args, noMmapArgs(p.exe)...)
+	args = append(args,
 		// --flash-attn off: llama-server's default ('auto', flash attention on
 		// for CUDA) silently crashes the subprocess a few seconds into
 		// generation — no CUDA error, no log line, the process just
@@ -104,12 +108,39 @@ func (p *process) spawnArgs() []string {
 		// #22483) — flash attention is the first thing to disable when a
 		// partially-offloaded llama-server crashes silently mid-generation.
 		"--flash-attn", "off",
-	}
+	)
 	if p.mmprojPath != "" {
 		args = append(args, "--mmproj", p.mmprojPath)
 	}
 	return args
 }
+
+// noMmapArgs makes llama-server read the model into memory rather than
+// memory-map it. llama.cpp replaced --no-mmap with --load-mode none, and each
+// spelling is rejected as an invalid argument by the builds that lack it, so
+// ask the binary which one it knows. Unprobeable binaries get --no-mmap.
+func noMmapArgs(exe string) []string {
+	if v, ok := loadModeSupport.Load(exe); ok {
+		if v.(bool) {
+			return []string{"--load-mode", "none"}
+		}
+		return []string{"--no-mmap"}
+	}
+	supported := bytes.Contains(engineHelp(exe), []byte("--load-mode"))
+	loadModeSupport.Store(exe, supported)
+	return noMmapArgs(exe)
+}
+
+var (
+	loadModeSupport sync.Map // engine path -> bool
+
+	engineHelp = func(exe string) []byte {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		out, _ := exec.CommandContext(ctx, exe, "--help").CombinedOutput()
+		return out
+	}
+)
 
 // Start spawns llama-server and waits until its /health endpoint returns 200.
 // Times out after 120 seconds (cold model load from disk can be slow).

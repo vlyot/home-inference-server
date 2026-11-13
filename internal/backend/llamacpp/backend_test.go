@@ -1067,6 +1067,33 @@ func TestSpawnArgsUseSetCtxSize(t *testing.T) {
 	}
 }
 
+func TestSpawnArgsPickNoMmapSpellingTheEngineKnows(t *testing.T) {
+	orig := engineHelp
+	t.Cleanup(func() { engineHelp = orig })
+	probes := 0
+	engineHelp = func(exe string) []byte {
+		probes++
+		if exe == "/new/llama-server" {
+			return []byte("-lm,   --load-mode MODE   model loading mode (default: auto)")
+		}
+		return []byte("--mmap, --no-mmap   whether to memory-map model")
+	}
+
+	newArgs := newProcess("/new/llama-server", "m.gguf", "", "strong", -1, 8092, 1).spawnArgs()
+	if got := argAfter(newArgs, "--load-mode"); got != "none" || argsHave(newArgs, "--no-mmap") {
+		t.Errorf("new engine args = %v; want --load-mode none and no --no-mmap", newArgs)
+	}
+	oldArgs := newProcess("/old/llama-server", "m.gguf", "", "strong", -1, 8092, 1).spawnArgs()
+	if !argsHave(oldArgs, "--no-mmap") || argsHave(oldArgs, "--load-mode") {
+		t.Errorf("old engine args = %v; want --no-mmap only", oldArgs)
+	}
+
+	newProcess("/new/llama-server", "m.gguf", "", "mid", -1, 8091, 1).spawnArgs()
+	if probes != 2 {
+		t.Errorf("engine probed %d times; want once per binary (2)", probes)
+	}
+}
+
 func TestNewProcessClampsParallelToOne(t *testing.T) {
 	p := newProcess("llama-server", "m", "", "weak", -1, 8090, 0)
 	if p.parallel != 1 {
