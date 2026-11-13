@@ -1,5 +1,22 @@
 {
-  "_comment": "Copy to config.json (git-ignored) OR set the equivalent env vars (RAILWAY_QUEUE_URL / RAILWAY_QUEUE_API_KEY win over this file). Only cmd/server reads this.",
-  "railway_queue_url": "https://your-queue-api.up.railway.app",
-  "railway_api_key": "PASTE_RELAY_QUEUE_API_KEY_HERE"
+  "_comment": "Per-device settings for cmd/server. `his-server setup` writes this for you. Every field is optional; values shown are the defaults or examples. Env vars (see .env.example) override fields. Keys starting with _ are ignored.",
+
+  "port": 8080,
+  "local_only": false,
+  "_bind_addr": "overrides port/local_only, e.g. 127.0.0.1:8080",
+
+  "api_key": "",
+  "cors_origins": ["http://localhost:5173"],
+
+  "engine_path": "/opt/homebrew/bin/llama-server",
+  "models_dir": "models",
+  "_models": "omit to use the 3 built-in models; any listed here replace them (one per tier: weak, mid, strong) — fields as in types.ModelDescriptor",
+
+  "railway_queue_url": "",
+  "railway_api_key": "",
+
+  "max_parallel": 2,
+  "ctx_size": 4096,
+  "infer_timeout_ms": 600000,
+  "chats_dir": ""
 }

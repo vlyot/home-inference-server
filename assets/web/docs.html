@@ -856,7 +856,11 @@ markdown libraries).</p>
 
 <h3>Running on a LAN</h3>
 <p>The local API is <strong>unauthenticated by default</strong>. To expose it
-beyond localhost, set:</p>
+beyond localhost, set these env vars &mdash; or the matching <code>config.json</code>
+fields (<code>api_key</code>, <code>cors_origins</code>, <code>bind_addr</code> /
+<code>local_only</code>, <code>infer_timeout_ms</code>, <code>max_parallel</code>,
+<code>ctx_size</code>), which <code>his-server setup</code> writes. An env var
+wins over its config field.</p>
 <div class="table-wrap">
 <table>
   <thead><tr><th>Env var</th><th>Effect</th></tr></thead>
@@ -1213,6 +1217,16 @@ There is no local defer queue and no local drain loop.</p>
   </tbody>
 </table>
 </div>
+
+<p>A tier whose GGUF file isn't in the device's models folder is skipped at
+startup (logged), so a device can run with only the models it has &mdash; e.g.
+only <code>strong</code>. A weak tier whose vision projector is missing is kept as
+text-only. With no vision-capable tier installed, an image request returns
+<code>400</code> <code>{"code": "invalid_request", "message": "no vision-capable model installed"}</code>,
+and a <code>preferred_tier</code> naming a missing tier returns <code>400</code>
+<code>preferred_tier "…" is not in the model roster</code>. Without NVIDIA's NVML
+(e.g. on a Mac) free VRAM reads as unknown and the largest installed tier is
+loaded fully onto the GPU.</p>
 
 <h3 id="vision-mode">How vision works (native multimodal weak tier)</h3>
 <p>There is no separate vision model or pipeline. <code>modality: "vision"</code>

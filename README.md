@@ -72,7 +72,7 @@ and a daily cap so a leaked token can't run up the bill.
 
 | Deployable                 | Entry point   | Runs on                   | Serves                                                                                |
 | -------------------------- | ------------- | ------------------------- | ------------------------------------------------------------------------------------- |
-| **Local inference server** | `cmd/server`  | the GPU box (Windows)     | `/v1/*`, dashboard, chat UI, `/docs`, `/logs`, loopback admin                         |
+| **Local inference server** | `cmd/server`  | the GPU box (Windows), or any Windows PC / Apple Silicon Mac | `/v1/*`, dashboard, chat UI, `/docs`, `/logs`, loopback admin                         |
 | **Hosted relay**           | `cmd/railway` | Railway (24/7, paid plan) | `/enqueue`, `/result/{id}`, `/status` for remote clients, `/apps/ask` for public browser apps; the PC worker long-polls it |
 
 Remote access is layered on top without touching the local inference server or
@@ -86,7 +86,7 @@ the `/v1/infer` contract.
 | ---------- | -------------------------- | ------- | :----: | --------------------------------------------- |
 | **Strong** | Gemma 4 E4B Q4_K_M         | ~4.7 GB |   —    | Primary under normal conditions               |
 | **Mid**    | Gemma 4 E2B Q4_K_M         | ~3.0 GB |   —    | Moderate-pressure fallback (same family)      |
-| **Weak**   | Qwen2.5-VL-3B-Instruct Q4_K_M | ~1.8 GB (+0.8 GB mmproj) | ✓ | Text last resort *and* the only vision-capable tier — a natively multimodal model, so it answers image questions directly instead of through a separate captioning hop |
+| **Weak**   | LFM2-VL-3B-Instruct Q4_K_M | ~1.6 GB (+ vision projector) | ✓ | Text last resort *and* the only vision-capable tier — a natively multimodal model, so it answers image questions directly instead of through a separate captioning hop |
 
 These were picked for bang for buck on my 8 GB card — the most capable model at
 each size that still leaves room to run. Weight sizes aren't hard VRAM
@@ -111,12 +111,13 @@ go run ./cmd/server
 
 Real inference needs:
 
-- `C:\llama\llama-server.exe` (llama.cpp b10696+, CUDA build)
-- `nvml.dll` in `System32` (ships with the NVIDIA driver)
-- The GGUF model files in `models\`:
-  `gemma-4-e4b-q4_k_m.gguf`, `gemma-4-e2b-q4_k_m.gguf`,
-  `qwen2.5-vl-3b-instruct-q4_k_m.gguf` +
-  `mmproj-qwen2.5-vl-3b-instruct-q8_0.gguf` (the weak tier's vision projector)
+- `llama-server` (llama.cpp b10696+): on Windows the CUDA build at
+  `C:\llama\llama-server.exe`; on macOS `brew install llama.cpp`
+- Windows only: `nvml.dll` in `System32` (ships with the NVIDIA driver)
+- At least one GGUF model file in `models/` — any missing ones are skipped:
+  `gemma-4-e4b-q4_k_m.gguf` (strong), `gemma-4-e2b-q4_k_m.gguf` (mid),
+  `lfm2-vl-3b-instruct-q4_k_m.gguf` +
+  `mmproj-lfm2-vl-3b-instruct-q8_0.gguf` (weak, plus its vision projector)
 
 From another terminal:
 
@@ -134,6 +135,32 @@ Then open:
 | <http://localhost:8080/chat>      | multi-turn chat UI with exact context-window accounting |
 | <http://localhost:8080/logs>      | structured event log viewer                             |
 | <http://localhost:8080/admin>     | drain / resume / restart buttons (**loopback only**)    |
+
+### Running on a new device (Windows or Mac)
+
+The program is the same everywhere; each device has its own `config.json` and
+its own set of model files.
+
+1. Get the program: a `his-server-…` download from the repo's GitHub Releases,
+   or `go build -o his-server ./cmd/server`. Downloads aren't signed — on macOS
+   run `xattr -d com.apple.quarantine ./his-server-darwin-arm64` once; on
+   Windows choose *More info → Run anyway*.
+2. Install `llama-server` (above) and put the model files you want in a
+   `models` folder. Only the strong model is fine; image requests then return
+   `400 no vision-capable model installed`.
+3. Run `./his-server setup`. It finds llama-server, checks the models folder,
+   asks whether the server is **local only** (bound to `127.0.0.1`, so nothing
+   else on the network can reach it) and whether to use the relay, then writes
+   the per-user `config.json`. On macOS it can also install a LaunchAgent that
+   starts the server at login and restarts it if it stops.
+4. Run `./his-server`.
+
+What differs off Windows: no tray icon; tier selection by free VRAM needs
+NVIDIA's NVML, so a Mac always loads the largest installed model (the speed
+floor can still step down if a smaller one is installed); and the restart
+button only relaunches under the Windows `run.cmd` loop or the macOS
+LaunchAgent. Idle, the server holds ~13 MB RAM and ~0% CPU — the model unloads
+20 s after the last request.
 
 ---
 
@@ -235,21 +262,31 @@ you can point at any running server
 
 ## Configuration (`cmd/server`)
 
-All env vars optional. Full annotated list in `.env.example`.
+Settings come from one `config.json` per device (every field optional — see
+`config.example.json`; `his-server setup` writes it). The file is found at
+`--config`, else `HIS_CONFIG`, else `./config.json` if present, else the
+per-user config folder (macOS: `~/Library/Application Support/home-inference-server/`).
+Each env var below overrides its config field. A malformed file or a
+non-numeric number var stops startup with the reason; unknown keys are logged
+and ignored. Full annotated env list in `.env.example`.
 
 | Var                                           | Default                                      | Purpose                                                                                                                                                            |
 | --------------------------------------------- | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `HIS_CONFIG`                                  | see above                                    | path to `config.json`                                                                                                                                              |
 | `PORT`                                        | `8080`                                       | listen port                                                                                                                                                        |
-| `HIS_BIND_ADDR`                               | `:PORT` (all interfaces)                     | e.g. `127.0.0.1:8080` to restrict to localhost                                                                                                                     |
+| `HIS_BIND_ADDR`                               | `:PORT` (all interfaces)                     | e.g. `127.0.0.1:8080` to restrict to localhost; config `local_only: true` does the same                                                                                                                     |
 | `HIS_API_KEY`                                 | _(unset)_                                    | when set, non-loopback callers to `/v1/*` must send `X-API-Key`. Unset = unauthenticated (fine on a trusted LAN)                                                   |
 | `HIS_CORS_ORIGINS`                            | _(unset)_                                    | comma-separated browser Origin allow-list; unset = CORS disabled                                                                                                   |
 | `HIS_MAX_PARALLEL`                            | `2`                                          | concurrent-inference degree — `llama-server --parallel`, the semaphore cap, and the worker count. **Set to `1` on an 8 GB card if you mostly use the strong tier** |
 | `HIS_INFER_TIMEOUT_MS`                        | `600000`                                     | per-request inference deadline when `timeout_ms` is omitted                                                                                                        |
 | `HIS_CTX_SIZE`                                | `4096`                                       | `llama-server --ctx-size` (⚠ roster KV estimates assume 4096)                                                                                                      |
-| `CHATS_DIR`                                   | `%LOCALAPPDATA%\home-inference-server\chats` | persisted conversations                                                                                                                                            |
-| `RAILWAY_QUEUE_URL` / `RAILWAY_QUEUE_API_KEY` | _(unset)_                                    | enables the offline-queue worker **and** durable deferral under pressure. Unset = LAN-only. Can also come from `config.json`                                       |
+| `CHATS_DIR`                                   | `%LOCALAPPDATA%\home-inference-server\chats` | persisted conversations (macOS: `~/Library/Application Support/home-inference-server/chats`)                                                                                                                                            |
+| `HIS_LLAMA_SERVER`                            | `C:\llama\llama-server.exe`                  | llama-server binary. Off Windows: `PATH`, then `/opt/homebrew/bin`, then `/usr/local/bin`                                                                          |
+| `HIS_MODELS_DIR`                              | `models`                                     | folder holding the GGUF files; models whose file is missing are skipped. Config `models` replaces the built-in roster                                              |
+| `RAILWAY_QUEUE_URL` / `RAILWAY_QUEUE_API_KEY` | _(unset)_                                    | enables the offline-queue worker **and** durable deferral under pressure. Unset = LAN-only                                       |
 
-Flags: `--backend=llamacpp|stub`, `--chats-dir <path>`.
+Flags: `--backend=llamacpp|stub`, `--config <path>`, `--chats-dir <path>`.
+Subcommand: `setup [--config <path>]`.
 
 Relay (`cmd/railway`) reads `DATABASE_URL` (Postgres), `QUEUE_API_KEY`, and — for
 the Neon Auth Bearer path — `STACK_JWKS_URL` + `STACK_PROJECT_ID`, plus optional
@@ -265,6 +302,13 @@ the Neon Auth Bearer path — `STACK_JWKS_URL` + `STACK_PROJECT_ID`, plus option
   session 0). Build with `-ldflags "-s -w"`, put the exe + `models\` on the box,
   point `RAILWAY_QUEUE_URL` / `RAILWAY_QUEUE_API_KEY` at the relay, register the
   task. Then: reboot, log in, and LAN + remote apps work with no terminal open.
+- **Other devices** — `his-server setup` (see *Running on a new device*). On
+  macOS it installs `~/Library/LaunchAgents/com.home-inference-server.plist`
+  (start at login, restart on exit; logs in `~/Library/Logs/home-inference-server.log`;
+  stop with `launchctl bootout gui/$(id -u)/com.home-inference-server`).
+- **Releases** — pushing a `v*` tag runs `.github/workflows/release.yml`, which
+  builds `his-server-windows-amd64.exe` and `his-server-darwin-arm64` (version
+  stamped from the tag) and attaches them to a GitHub Release.
 - **Relay** — standard Railway deploy of `cmd/railway`
   (`go build -o /app/relay ./cmd/railway`), pointed at a Postgres database. I use
   Neon, sharing it with Neon Auth so `jobs` / `usage` / `allowed_members` sit
@@ -287,10 +331,10 @@ The server has loopback-only admin endpoints — `curl` from the box, or the
 
 |               |                                                                                                                                 |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| **GPU**       | NVIDIA, NVML via `nvml.dll` (System32). Developed on an RTX 4060 Ti 8 GB (~6.2 GB usable after desktop overhead)                |
-| **OS**        | Windows for the tray + job-object subprocess cleanup. Cross-compiles for CI (`CGO_ENABLED=0 GOOS=linux`) with tray/NVML stubbed |
+| **GPU**       | Windows: NVIDIA, NVML via `nvml.dll` (System32). Developed on an RTX 4060 Ti 8 GB (~6.2 GB usable after desktop overhead). macOS: Apple Silicon (Metal) |
+| **OS**        | Windows (tray + job-object subprocess cleanup) or macOS on Apple Silicon. Linux builds and tests with tray/NVML stubbed         |
 | **Go**        | 1.23                                                                                                                            |
-| **llama.cpp** | `llama-server.exe`, CUDA build, at `C:\llama\`                                                                                  |
+| **llama.cpp** | Windows: `llama-server.exe`, CUDA build, at `C:\llama\`. macOS: `brew install llama.cpp`                                                                                  |
 | **Relay**     | Postgres (Neon) + a Neon Auth (Stack Auth) project                                                                              |
 
 ---
@@ -300,7 +344,7 @@ The server has loopback-only admin endpoints — `curl` from the box, or the
 | Path                                                                               | What                                                     |
 | ---------------------------------------------------------------------------------- | -------------------------------------------------------- |
 | `api/`                                                                             | request / response / constant types — the wire contract  |
-| `cmd/server/`                                                                      | local inference server entry point + model roster        |
+| `cmd/server/`                                                                      | local inference server entry point + `setup` subcommand        |
 | `cmd/railway/`                                                                     | hosted relay entry point                                 |
 | `cmd/bench/`                                                                       | throughput / latency benchmark harness                   |
 | `cmd/testapp/`, `internal/testapp/`                                                | CLI examples + pointable conformance suite               |
@@ -311,6 +355,8 @@ The server has loopback-only admin endpoints — `curl` from the box, or the
 | `internal/backend/vram/`                                                           | tier selection (incl. vision-mode), layer split, eviction, reaper |
 | `internal/backend/llamacpp/`                                                       | `llama-server` subprocess + HTTP client, conditional `--mmproj` spawn |
 | `internal/backend/stub/`                                                           | fake backend (CI)                                        |
+| `internal/config/`                                                                 | per-device `config.json`, env overrides, built-in model roster |
+| `internal/setup/`                                                                  | interactive first-run assistant + macOS LaunchAgent      |
 | `internal/relayenqueue/`                                                           | local side of durable deferral to the relay               |
 | `internal/remote/`                                                                 | PC-side long-poll worker                                 |
 | `internal/railwayq/`                                                               | relay queue store + HTTP handlers                        |

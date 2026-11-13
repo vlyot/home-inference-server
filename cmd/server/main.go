@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -10,7 +9,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -22,6 +20,7 @@ import (
 	"github.com/ngkaichong/home-inference-server/internal/backend/vram"
 	"github.com/ngkaichong/home-inference-server/internal/batcher"
 	"github.com/ngkaichong/home-inference-server/internal/chatstore"
+	"github.com/ngkaichong/home-inference-server/internal/config"
 	"github.com/ngkaichong/home-inference-server/internal/dashboard"
 	"github.com/ngkaichong/home-inference-server/internal/dispatcher"
 	"github.com/ngkaichong/home-inference-server/internal/logbuf"
@@ -30,6 +29,7 @@ import (
 	"github.com/ngkaichong/home-inference-server/internal/remote"
 	"github.com/ngkaichong/home-inference-server/internal/router"
 	"github.com/ngkaichong/home-inference-server/internal/server"
+	"github.com/ngkaichong/home-inference-server/internal/setup"
 	isystem "github.com/ngkaichong/home-inference-server/internal/system"
 	"github.com/ngkaichong/home-inference-server/internal/tray"
 	"github.com/ngkaichong/home-inference-server/internal/websearch"
@@ -37,148 +37,47 @@ import (
 	"github.com/ngkaichong/home-inference-server/types"
 )
 
-type appConfig struct {
-	RailwayQueueURL string `json:"railway_queue_url"`
-	RailwayAPIKey   string `json:"railway_api_key"`
-}
+// version is overridden at release build time via -ldflags "-X main.version=…".
+var version = "0.13.0"
 
-func loadConfig() appConfig {
-	var cfg appConfig
-	if data, err := os.ReadFile("config.json"); err == nil {
-		if err := json.Unmarshal(data, &cfg); err != nil {
-			slog.Warn("config.json parse error", "err", err)
-			cfg = appConfig{}
+// startupRoster builds the roster this run serves. The stub backend keeps the
+// full configured roster (it needs no files); the real backend drops tiers whose
+// GGUF isn't on disk and refuses to start with none.
+func startupRoster(cfg config.Config, backendKind string, exists func(string) bool) ([]types.ModelDescriptor, error) {
+	roster, err := cfg.Roster()
+	if err != nil {
+		return nil, err
+	}
+	if backendKind == "stub" {
+		return roster, nil
+	}
+	kept, notes := config.FilterInstalled(roster, exists)
+	for _, n := range notes {
+		slog.Warn("model roster: " + n)
+	}
+	if len(kept) == 0 {
+		var want []string
+		for _, d := range roster {
+			want = append(want, filepath.Base(d.FilePath))
 		}
+		dir, _ := filepath.Abs(cfg.ModelsDir)
+		return nil, fmt.Errorf("no model files found in %s; expected at least one of: %s",
+			dir, strings.Join(want, ", "))
 	}
-	// Environment variables win over config.json — the autostart deploy
-	// (deploy/windows/run.cmd) sets these instead of shipping a config file.
-	cfg.RailwayQueueURL = envStr("RAILWAY_QUEUE_URL", cfg.RailwayQueueURL)
-	cfg.RailwayAPIKey = envStr("RAILWAY_QUEUE_API_KEY", cfg.RailwayAPIKey)
-	return cfg
+	return kept, nil
 }
-
-const version = "0.13.0"
-
-// defaultMaxParallel is the concurrent-inference degree: llama-server's
-// --parallel N, the vram.Backend semaphore capacity, and the dispatcher's
-// worker count. Overridable via HIS_MAX_PARALLEL. Sized for an 8 GB card where
-// 2 KV caches fit alongside a partially-offloaded strong tier.
-const defaultMaxParallel = 2
-
-// llamaExe is the path to the llama-server binary.
-const llamaExe = `C:\llama\llama-server.exe`
-
-// defaultRoster is the tiered model roster. RequiredVRAMMB is the GGUF weight
-// size; GPULayers is computed dynamically at load time. TotalLayers, KVCacheMB
-// and KVFixedMB are read from llama-server startup logs (--ctx-size 4096) and
-// feed the partial-offload fit test in vram.selectAndLoad. The GPU-resident
-// footprint of a full-offload load is RequiredVRAMMB + KVCacheMB*N + KVFixedMB
-// (N = HIS_MAX_PARALLEL); the eviction loop and selectAndLoad both size pressure
-// against that sum via GPUResidentMB, never against RequiredVRAMMB alone.
-// KVCacheMB (per --parallel slot) vs KVFixedMB (compute buffers + CUDA context,
-// constant) split from the old single KVOverheadMB — the cache portion is the
-// ctx-proportional part, roughly two thirds. Tighten from slog.Debug
-// llama-server startup lines on the GPU.
-//
-// Every tier is a text.Backend; a tier whose MMProjPath is set (currently only
-// weak) ALSO accepts modality: "vision" requests — vram.Backend restricts
-// vision selection to HasVision() tiers and spawns that tier's subprocess with
-// --mmproj only for the request that actually needs it (see
-// types.ModelDescriptor.WeightMB / VisionKVParts and
-// llamacpp.Backend.SetNextNeedsVision). There is no separate vision-only
-// roster or backend.
-var defaultRoster = []types.ModelDescriptor{
-	{
-		TierLabel: types.TierWeak,
-		Name:      "lfm2-vl-3b-instruct",
-		FilePath:  `models\lfm2-vl-3b-instruct-q4_k_m.gguf`,
-		// MMProjPath makes this tier vision-capable. It is passed to
-		// llama-server ONLY on a load that a vision request triggers
-		// (llamacpp.Backend.ensureRunning consults SetNextNeedsVision) — a
-		// plain text load never touches --mmproj or the VRAM it costs. See
-		// HasVision(), WeightMB(), VisionKVParts().
-		//
-		// Swapped from qwen2.5-vl-3b-instruct (Phase 13f): Qwen2.5-VL-3B
-		// reliably hallucinated a different confident-but-wrong identification
-		// on the same test image across repeated runs once prompted to commit
-		// to identifications ("Coca-Cola", "Amazon Alexa logo", "Raspberry Pi"
-		// — never the same answer twice). LFM2-VL-3B (Liquid AI, SigLIP2 NaFlex
-		// encoder with real image-token reduction) passed the same repeated
-		// test cleanly: consistent, calibrated answers, no hallucinated brand
-		// names, and a real quality edge over its own 1.6B sibling (MMMU 48.4
-		// vs 40.56, Liquid's published numbers) while measuring LOWER resident
-		// VRAM than the Qwen2.5-VL-3B setup it replaces. Two other candidate
-		// families were tested and rejected on real hardware first — see
-		// roadmap.md: Qwen3-VL (2B and 4B both measured ~6 GB resident
-		// regardless of text-model size, the vision encoder's fixed cost
-		// dominates, not the text backbone) and Gemma-4-E2B-vision (burns its
-		// entire token budget in reasoning mode, then falsely claims no image
-		// was provided).
-		MMProjPath:     `models\mmproj-lfm2-vl-3b-instruct-q8_0.gguf`,
-		RequiredVRAMMB: 1568, // Q4_K_M text weights, measured file size (1567.7 MB)
-		Modality:       "text",
-		TotalLayers:    30, // lfm2.block_count from the GGUF metadata
-		KVCacheMB:      40,
-		KVFixedMB:      182,
-		// Vision-mode constants, measured on the real GPU (RTX 4060 Ti 8 GB):
-		// text-only load (no --mmproj) resident ~1830 MB at --parallel 2,
-		// ~1939 MB at --parallel 1; vision-mode load (with --mmproj) resident
-		// ~2450 MB at --parallel 2, ~2630 MB at --parallel 1. The per-slot
-		// swing between parallel=1 and parallel=2 was smaller than the ~100 MB
-		// run-to-run measurement noise floor (LFM2's hybrid conv+attention
-		// architecture appears to carry very little KV-cache pressure), so
-		// KVCacheMB/VisionKVCacheMB are a small conservative nonzero floor
-		// rather than a value derived from a clean per-slot delta, and
-		// VisionKVFixedMB is sized off the HIGHER of the two vision-mode
-		// readings (2630, not 2450) to stay on the safe (over-, not under-)
-		// booking side per this project's convention. See roadmap.md for the
-		// full measurement log.
-		VisionRequiredVRAMMB: 1568,
-		VisionKVCacheMB:      40,
-		VisionKVFixedMB:      982,
-		Port:                 8093,
-		// RequireChatTemplate: LFM2-VL-3B produced noticeably degraded output
-		// on a raw prompt-only /completion request (repetition loops, or a
-		// quiz-continuation like "A) Paris B) London..." instead of a direct
-		// answer) — the same prompt through the chat-template path answered
-		// correctly every time. See types.ModelDescriptor.RequireChatTemplate.
-		RequireChatTemplate: true,
-	},
-	{
-		TierLabel:      types.TierMid,
-		Name:           "gemma-4-e2b-q4_k_m",
-		FilePath:       `models\gemma-4-e2b-q4_k_m.gguf`,
-		RequiredVRAMMB: 2963,
-		Modality:       "text",
-		TotalLayers:    30,
-		KVCacheMB:      450,
-		KVFixedMB:      250,
-		Port:           8091,
-	},
-	{
-		TierLabel:      types.TierStrong,
-		Name:           "gemma-4-e4b-q4_k_m",
-		FilePath:       `models\gemma-4-e4b-q4_k_m.gguf`,
-		RequiredVRAMMB: 4747,
-		Modality:       "text",
-		TotalLayers:    34,
-		KVCacheMB:      580,
-		KVFixedMB:      320,
-		Port:           8092,
-	},
-}
-
-// rosterPorts is the set of localhost ports our llama-server subprocesses use;
-// the reaper only ever kills stray llama-server processes on one of these.
-var rosterPorts = func() []int {
-	ports := make([]int, 0, len(defaultRoster))
-	for _, d := range defaultRoster {
-		ports = append(ports, d.Port)
-	}
-	return ports
-}()
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "setup" {
+		fs := flag.NewFlagSet("setup", flag.ExitOnError)
+		path := fs.String("config", "", "where to write config.json (default: the per-user config folder)")
+		_ = fs.Parse(os.Args[2:]) // ExitOnError: Parse exits on a bad flag
+		if err := setup.Run(os.Stdin, os.Stdout, setup.OSEnv(*path)); err != nil {
+			exitf("setup: %v", err)
+		}
+		return
+	}
+
 	logBuf := logbuf.NewBuffer(5000, 24*time.Hour)
 	logOpts := &slog.HandlerOptions{}
 	if os.Getenv("HIS_DEBUG_LOG") != "" {
@@ -187,17 +86,40 @@ func main() {
 	logger := slog.New(logBuf.Handler(slog.NewJSONHandler(os.Stdout, logOpts)))
 	slog.SetDefault(logger)
 
-	var flagChatsDir string
-	var flagBackend string
-	flag.StringVar(&flagChatsDir, "chats-dir", "", "directory for persisted chat conversations (default: %LOCALAPPDATA%\\home-inference-server\\chats)")
+	var flagChatsDir, flagBackend, flagConfig string
+	flag.StringVar(&flagConfig, "config", "", "path to config.json (default: ./config.json if present, else the per-user config folder)")
+	flag.StringVar(&flagChatsDir, "chats-dir", "", "directory for persisted chat conversations (overrides config chats_dir)")
 	flag.StringVar(&flagBackend, "backend", "llamacpp", "inference backend: 'llamacpp' (real, needs the GPU + models) or 'stub' (fake, for CI / the conformance suite)")
 	flag.Parse()
 
-	cfg := loadConfig()
-	port := envStr("PORT", "8080")
-	maxParallel := envInt("HIS_MAX_PARALLEL", defaultMaxParallel)
-	if maxParallel < 1 {
-		maxParallel = 1
+	osEnv := config.OSEnv()
+	cfgPath := config.Locate(flagConfig, osEnv)
+	cfg, unknownKeys, err := config.Load(cfgPath, osEnv)
+	if err != nil {
+		exitf("config: %v", err)
+	}
+	slog.Info("config loaded", "path", cfgPath, "exists", config.FileExists(cfgPath))
+	for _, k := range unknownKeys {
+		slog.Warn("config: ignoring unknown key", "path", cfgPath, "key", k)
+	}
+	if flagChatsDir != "" {
+		cfg.ChatsDir = flagChatsDir
+	}
+	maxParallel := cfg.MaxParallel
+	if cfg.CtxSize > 0 {
+		llamacpp.SetCtxSize(cfg.CtxSize)
+		if cfg.CtxSize != llamacpp.DefaultCtxSize {
+			slog.Warn("ctx_size differs from the 4096 the roster's KV estimates were measured at; VRAM fit math may be off",
+				slog.Int("ctx_size", cfg.CtxSize))
+		}
+	}
+
+	roster, err := startupRoster(cfg, flagBackend, config.FileExists)
+	if err != nil {
+		exitf("models: %v", err)
+	}
+	if flagBackend != "stub" && !config.FileExists(cfg.EnginePath) {
+		exitf("llama-server not found (engine_path %q). Install it (macOS: brew install llama.cpp) or set engine_path in %s", cfg.EnginePath, cfgPath)
 	}
 
 	nvmlProvider := vram.NVMLProvider{}
@@ -215,15 +137,15 @@ func main() {
 	// same subprocess identity — vram.Backend decides per-request whether to
 	// spawn it with --mmproj (see SetNextNeedsVision).
 	var llamaInners []*llamacpp.Backend
-	inners := make(map[types.ModelTierLabel]backend.Backend, len(defaultRoster))
+	inners := make(map[types.ModelTierLabel]backend.Backend, len(roster))
 	if flagBackend == "stub" {
-		for _, desc := range defaultRoster {
+		for _, desc := range roster {
 			inners[desc.TierLabel] = stub.New(backend.ModalityKindText, 0)
 		}
 		slog.Warn("running with the STUB inference backend — responses are fake")
 	} else {
-		for _, desc := range defaultRoster {
-			lb := llamacpp.New(backend.ModalityKindText, desc, llamaExe, nvmlProvider, maxParallel)
+		for _, desc := range roster {
+			lb := llamacpp.New(backend.ModalityKindText, desc, cfg.EnginePath, nvmlProvider, maxParallel)
 			inners[desc.TierLabel] = lb
 			llamaInners = append(llamaInners, lb)
 		}
@@ -231,7 +153,7 @@ func main() {
 
 	// Reaper kills any stray llama-server left on a roster port by a previous
 	// crash or a failed eviction. "owned" is the live set of our subprocess PIDs.
-	reaper := vram.NewReaper(rosterPorts, func() map[int]bool {
+	reaper := vram.NewReaper(rosterPorts(roster), func() map[int]bool {
 		owned := make(map[int]bool, len(llamaInners))
 		for _, lb := range llamaInners {
 			if pid := lb.RunningPID(); pid != 0 {
@@ -257,7 +179,7 @@ func main() {
 		opts.Reaper = reaper
 	}
 
-	vramBackend := vram.New(backend.ModalityKindText, defaultRoster, vramProvider, inners, opts)
+	vramBackend := vram.New(backend.ModalityKindText, roster, vramProvider, inners, opts)
 
 	backends := map[backend.ModalityKind]backend.Backend{
 		backend.ModalityKindText:   vramBackend,
@@ -324,19 +246,13 @@ func main() {
 		srv.SetDescriber(vramBackend)
 	}
 	srv.SetLogSource(logBuf)
-	if inferTOMS := envInt("HIS_INFER_TIMEOUT_MS", 0); inferTOMS > 0 {
-		srv.SetInferTimeout(time.Duration(inferTOMS) * time.Millisecond)
+	if cfg.InferTimeoutMS > 0 {
+		srv.SetInferTimeout(time.Duration(cfg.InferTimeoutMS) * time.Millisecond)
 	}
 
 	srv.SetToolSearcher(websearch.NewClient(10 * time.Second))
 
-	chatsDir := flagChatsDir
-	if chatsDir == "" {
-		chatsDir = os.Getenv("CHATS_DIR")
-	}
-	if chatsDir == "" {
-		chatsDir = filepath.Join(os.Getenv("LOCALAPPDATA"), "home-inference-server", "chats")
-	}
+	chatsDir := cfg.ChatsDir
 	if store, err := chatstore.Open(chatsDir); err != nil {
 		slog.Warn("chat persistence disabled", "dir", chatsDir, "err", err)
 	} else {
@@ -375,18 +291,14 @@ func main() {
 	// unauthenticated unless HIS_API_KEY is set). CORS wraps auth so an OPTIONS
 	// preflight isn't rejected by the key check.
 	var handler http.Handler = mux
-	handler = server.APIKeyAuth(os.Getenv("HIS_API_KEY"), handler)
-	if origins := os.Getenv("HIS_CORS_ORIGINS"); origins != "" {
-		handler = server.CORS(strings.Split(origins, ","), handler)
-		slog.Info("CORS enabled", "origins", origins)
+	handler = server.APIKeyAuth(cfg.APIKey, handler)
+	if len(cfg.CORSOrigins) > 0 {
+		handler = server.CORS(cfg.CORSOrigins, handler)
+		slog.Info("CORS enabled", "origins", strings.Join(cfg.CORSOrigins, ","))
 	}
 
-	bindAddr := os.Getenv("HIS_BIND_ADDR")
-	if bindAddr == "" {
-		bindAddr = fmt.Sprintf(":%s", port)
-	}
-
-	dashboardURL := fmt.Sprintf("http://localhost:%s", port)
+	bindAddr := cfg.ListenAddr()
+	dashboardURL := fmt.Sprintf("http://localhost:%d", cfg.Port)
 	go tray.Run(ctx, dashboardURL, notifyCh)
 
 	httpServer := &http.Server{
@@ -459,13 +371,6 @@ func writeRestartSentinel() {
 	slog.Info("restart: sentinel written", "path", flag)
 }
 
-func envStr(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
-}
-
 // stubTokenizer backs /v1/tokenize and /v1/model/props when running with
 // --backend=stub, so the conformance suite can exercise those routes with no
 // llama-server. It approximates token count as whitespace-separated words.
@@ -484,12 +389,17 @@ func (stubDescriber) Describe(_ context.Context, _ []byte) (string, string, erro
 	return "a stub image description", "weak", nil
 }
 
-func envInt(key string, fallback int) int {
-	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
-		}
-		slog.Warn("ignoring non-integer env var", "key", key, "value", v)
+// rosterPorts is the set of localhost ports our llama-server subprocesses use;
+// the reaper only ever kills stray llama-server processes on one of these.
+func rosterPorts(roster []types.ModelDescriptor) []int {
+	ports := make([]int, 0, len(roster))
+	for _, d := range roster {
+		ports = append(ports, d.Port)
 	}
-	return fallback
+	return ports
+}
+
+func exitf(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "home-inference-server: "+format+"\n", args...)
+	os.Exit(1)
 }

@@ -401,6 +401,12 @@ func (b *Backend) InferStream(ctx context.Context, req backend.Request, chunkFn 
 // fitting falls through to selectAndLoad's own "overloaded" error.
 func (b *Backend) selectInner(ctx context.Context, req backend.Request, initialForced *types.ModelDescriptor) (*types.ModelDescriptor, backend.Backend, error) {
 	needsVision := len(req.ImageData) > 0
+	if needsVision && !b.hasVisionTier() {
+		return nil, nil, &backend.BackendError{
+			Code:    "invalid_request",
+			Message: "no vision-capable model installed",
+		}
+	}
 
 	var pinned *types.ModelDescriptor
 	if req.PreferredTier != "" {
@@ -968,6 +974,15 @@ func (b *Backend) tierByLabel(label types.ModelTierLabel) (*types.ModelDescripto
 		}
 	}
 	return nil, false
+}
+
+func (b *Backend) hasVisionTier() bool {
+	for _, d := range b.roster {
+		if d.HasVision() {
+			return true
+		}
+	}
+	return false
 }
 
 // rosterIndex returns the index of the tier with the given label.

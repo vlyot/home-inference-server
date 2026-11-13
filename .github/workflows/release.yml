@@ -1,0 +1,48 @@
+name: Release
+
+# Pushing a v* tag (e.g. `git tag v0.14.0 && git push origin v0.14.0`) builds the
+# local inference server for Windows and Apple Silicon macOS and attaches both
+# programs to a GitHub Release. Each is built on its own OS: the macOS CPU
+# sampler and the Windows tray need native toolchains.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            asset: his-server-windows-amd64.exe
+          - os: macos-latest
+            asset: his-server-darwin-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      - name: build
+        shell: bash
+        run: go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_REF_NAME#v}" -o "${{ matrix.asset }}" ./cmd/server
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --generate-notes

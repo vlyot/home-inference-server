@@ -14,22 +14,24 @@ import (
 	"time"
 )
 
-// ctxSize is the llama-server --ctx-size (the shared budget; with --parallel N
-// each slot gets ctxSize/N). The roster's KVCacheMB/KVFixedMB estimates
-// (types.ModelDescriptor) are hand-tuned for exactly this value — raising it
-// grows the KV cache and makes those estimates (and the fit/eviction math built
-// on them) wrong. Overridable via HIS_CTX_SIZE with a warning; see cmd/server.
-const ctxSize = 4096
+// DefaultCtxSize is the llama-server --ctx-size (the shared budget; with
+// --parallel N each slot gets DefaultCtxSize/N). The roster's KVCacheMB/KVFixedMB
+// estimates (types.ModelDescriptor) are hand-tuned for exactly this value —
+// raising it grows the KV cache and makes those estimates (and the fit/eviction
+// math built on them) wrong. cmd/server overrides it from config with a warning.
+const DefaultCtxSize = 4096
 
-// ctxSizeValue returns the effective --ctx-size, honouring a HIS_CTX_SIZE
-// override.
+var ctxSize atomic.Int64
+
+// SetCtxSize overrides --ctx-size for every subprocess spawned afterwards.
+// n <= 0 restores DefaultCtxSize.
+func SetCtxSize(n int) { ctxSize.Store(int64(n)) }
+
 func ctxSizeValue() int {
-	if v := os.Getenv("HIS_CTX_SIZE"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			return n
-		}
+	if n := ctxSize.Load(); n > 0 {
+		return int(n)
 	}
-	return ctxSize
+	return DefaultCtxSize
 }
 
 // process manages a single llama-server.exe subprocess.

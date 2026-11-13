@@ -1324,6 +1324,39 @@ func TestSelectInner_PreferredTierVisionRequest_NonVisionTier_Returns400(t *test
 	}
 }
 
+func TestSelectInner_VisionRequest_NoVisionTierInstalled_Returns400(t *testing.T) {
+	b := New(backend.ModalityKindText, testRoster(), &MockVRAMProvider{FreeMB: 10000}, stubInners(0), fastOpts())
+	defer b.Shutdown(context.Background())
+
+	_, _, err := b.selectInner(context.Background(), backend.Request{ImageData: []byte{1}}, nil)
+	be := &backend.BackendError{}
+	if !errors.As(err, &be) || be.Code != "invalid_request" || be.Message != "no vision-capable model installed" {
+		t.Fatalf("err = %v; want invalid_request 'no vision-capable model installed'", err)
+	}
+}
+
+// TestSingleTierRoster_SlowStrongStillServes models a Mac with only the strong
+// model downloaded and no NVML (-1 = unknown VRAM): a speed-floor miss has no
+// smaller tier to cascade to, so the request is still served on strong.
+func TestSingleTierRoster_SlowStrongStillServes(t *testing.T) {
+	roster := testRoster()[2:]
+	inners := map[types.ModelTierLabel]backend.Backend{
+		types.TierStrong: &measurableStub{tier: types.TierStrong, tps: 1, resident: 4000},
+	}
+	b := New(backend.ModalityKindText, roster, &MockVRAMProvider{FreeMB: -1}, inners, fastOpts())
+	defer b.Shutdown(context.Background())
+
+	for i := 0; i < 2; i++ { // the second call sees the slow tok/s sample from the first
+		resp, err := b.Infer(context.Background(), backend.Request{Priority: "high", CorrelationID: "c1"})
+		if err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
+		if resp.ModelTier != string(types.TierStrong) {
+			t.Errorf("call %d: tier = %q; want strong", i, resp.ModelTier)
+		}
+	}
+}
+
 func TestSelectAndLoad_ModeSwitchForcesEvictAndReload(t *testing.T) {
 	inners, weak := visionInners()
 	mock := &MockVRAMProvider{FreeMB: 10000}

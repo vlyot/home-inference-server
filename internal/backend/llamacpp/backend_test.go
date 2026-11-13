@@ -1045,6 +1045,28 @@ func TestSpawnArgsDisableFlashAttn(t *testing.T) {
 	}
 }
 
+func argAfter(args []string, flag string) string {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == flag {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
+func TestSpawnArgsUseSetCtxSize(t *testing.T) {
+	t.Cleanup(func() { SetCtxSize(0) })
+	p := newProcess("llama-server", "m.gguf", "", "strong", -1, 8092, 1)
+
+	if got := argAfter(p.spawnArgs(), "--ctx-size"); got != "4096" {
+		t.Errorf("default --ctx-size = %q; want 4096", got)
+	}
+	SetCtxSize(8192)
+	if got := argAfter(p.spawnArgs(), "--ctx-size"); got != "8192" {
+		t.Errorf("--ctx-size after SetCtxSize(8192) = %q; want 8192", got)
+	}
+}
+
 func TestNewProcessClampsParallelToOne(t *testing.T) {
 	p := newProcess("llama-server", "m", "", "weak", -1, 8090, 0)
 	if p.parallel != 1 {
